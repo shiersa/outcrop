@@ -249,10 +249,14 @@ type totals struct {
 
 	// 燃烧速率用：只累加相邻消息间隔 <= idleGapMax 的部分，
 	// 这样中间去吃个饭不会把速率稀释成毫无意义的数字
+	FirstTS   int64 `json:"first_ts"`
 	LastTS    int64 `json:"last_ts"`
 	ActiveSec int64 `json:"active_sec"`
-	SawUsage  bool  `json:"saw_usage"`
-	SawCache  bool  `json:"saw_cache"`
+
+	// 工具调用次数。从 assistant 消息的 content 里的 tool_use 块统计。
+	Tools    map[string]int `json:"tools,omitempty"`
+	SawUsage bool           `json:"saw_usage"`
+	SawCache bool           `json:"saw_cache"`
 
 	// 增量游标
 	Offset  int64  `json:"offset"`
@@ -301,11 +305,17 @@ func (t totals) burnRate() (float64, bool) {
 
 const idleGapMax = 300 // 秒。超过这个间隔视为离开，不计入活跃时长
 
+type contentBlock struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}
+
 type txRecord struct {
 	IsSidechain bool   `json:"isSidechain"`
 	Timestamp   string `json:"timestamp"`
 	Message     *struct {
-		Usage *struct {
+		Content json.RawMessage `json:"content"`
+		Usage   *struct {
 			Input       int64 `json:"input_tokens"`
 			Output      int64 `json:"output_tokens"`
 			CacheRead   int64 `json:"cache_read_input_tokens"`
@@ -398,9 +408,26 @@ func scanTranscript(path string) (totals, bool) {
 		if c := u.Input + u.CacheRead + u.CacheCreate; c > 0 {
 			t.Ctx = c
 		}
+		// content 可能是字符串也可能是块数组，只在是数组时才找 tool_use
+		if len(rec.Message.Content) > 0 && rec.Message.Content[0] == '[' {
+			var blocks []contentBlock
+			if json.Unmarshal(rec.Message.Content, &blocks) == nil {
+				for _, b := range blocks {
+					if b.Type == "tool_use" && b.Name != "" {
+						if t.Tools == nil {
+							t.Tools = map[string]int{}
+						}
+						t.Tools[b.Name]++
+					}
+				}
+			}
+		}
 		if rec.Timestamp != "" {
 			if ts, err := time.Parse(time.RFC3339, rec.Timestamp); err == nil {
 				sec := ts.Unix()
+				if t.FirstTS == 0 {
+					t.FirstTS = sec
+				}
 				if t.LastTS > 0 {
 					if gap := sec - t.LastTS; gap > 0 && gap <= idleGapMax {
 						t.ActiveSec += gap
@@ -510,16 +537,51 @@ func contextUsage(in input, t totals) (float64, int64, string) {
 // ---------------------------------------------------------------------------
 
 type displayConfig struct {
+	// 新式：显式布局，每个内层数组是一行
+	Lines     [][]string `json:"lines"`
+	ToolLimit *int       `json:"toolLimit"`
+
+	// 旧式布尔开关，v2 配置文件里的写法。没有 lines 时用它们拼出单行，
+	// 这样升级不会把用户的配置作废。
 	CacheHit       *bool `json:"cacheHit"`
 	BurnRate       *bool `json:"burnRate"`
 	TokenBreakdown *bool `json:"tokenBreakdown"`
 }
 
-func (d displayConfig) on(p *bool, def bool) bool {
+func on(p *bool, def bool) bool {
 	if p == nil {
 		return def
 	}
 	return *p
+}
+
+func (d displayConfig) toolLimit() int {
+	if d.ToolLimit == nil || *d.ToolLimit <= 0 {
+		return 4
+	}
+	return *d.ToolLimit
+}
+
+// layout 决定渲染哪些 widget、怎么分行。
+// 优先级：显式 lines > 旧布尔开关推导 > 内置默认。
+func (d displayConfig) layout() [][]string {
+	if len(d.Lines) > 0 {
+		return d.Lines
+	}
+	if d.CacheHit != nil || d.BurnRate != nil || d.TokenBreakdown != nil {
+		row := []string{"model", "quota", "tokens", "cost"}
+		if on(d.CacheHit, true) {
+			row = append(row, "cache")
+		}
+		if on(d.BurnRate, true) {
+			row = append(row, "burn")
+		}
+		if on(d.TokenBreakdown, false) {
+			row = append(row, "breakdown")
+		}
+		return [][]string{append(row, "ctx")}
+	}
+	return [][]string{defaultLine}
 }
 
 func loadDisplay() displayConfig {
@@ -764,104 +826,327 @@ func renderRateLimits(raw json.RawMessage) string {
 // 渲染
 // ---------------------------------------------------------------------------
 
-func render(in input, raw map[string]interface{}) string {
-	provider, _ := detectProvider()
-	name := in.Model.DisplayName
-	if name == "" {
-		name = in.Model.ID
-	}
-	if name == "" {
-		name = "?"
-	}
-	modelID := in.Model.ID
-	if modelID == "" {
-		modelID = name
-	}
+// widgetCtx 把渲染一个 widget 需要的东西打包，避免每个 widget 重复取。
+type widgetCtx struct {
+	in       input
+	raw      map[string]interface{}
+	t        totals
+	provider string
+	modelID  string
+}
 
-	t, _ := scanTranscript(in.TranscriptPath)
-	segs := []string{cMag + name + cReset}
+// widgets 是名字到渲染函数的映射。返回空串表示"这次没什么可显示的"，
+// 该 widget 会被整段跳过 —— 显示一个 "n/a" 只是占地方。
+var widgets = map[string]func(widgetCtx) string{
+	"model": func(c widgetCtx) string {
+		n := c.in.Model.DisplayName
+		if n == "" {
+			n = c.in.Model.ID
+		}
+		if n == "" {
+			return ""
+		}
+		return cMag + n + cReset
+	},
 
-	switch provider {
-	case "anthropic":
-		if s := renderRateLimits(in.RateLimits); s != "" {
-			segs = append(segs, s)
-		} else {
-			segs = append(segs, cGray+"quota n/a"+cReset)
+	"quota": func(c widgetCtx) string {
+		switch c.provider {
+		case "anthropic":
+			if s := renderRateLimits(c.in.RateLimits); s != "" {
+				return s
+			}
+			return cGray + "quota n/a" + cReset
+		case "glm":
+			return renderGLMQuota()
 		}
-	case "glm":
-		q, age := glmQuotaCached()
-		if q != nil {
-			gc := loadGLMConfig()
-			p, ok := dig(q, gc.Fields["used_pct"]...)
-			if !ok {
-				// 没有现成的百分比就用 used/total 算
-				used, ok1 := dig(q, gc.Fields["used"]...)
-				total, ok2 := dig(q, gc.Fields["total"]...)
-				if ok1 && ok2 && total > 0 {
-					p, ok = used/total*100, true
-				}
-			}
-			if ok {
-				p = normPct(p)
-				segs = append(segs, fmt.Sprintf("%s5h %s %.0f%%%s",
-					pctColor(p), bar(p, 5), p, cReset))
-			} else {
-				segs = append(segs, cRed+"字段未匹配"+cReset)
-			}
-			if p, ok := dig(q, gc.Fields["mcp_pct"]...); ok {
-				p = normPct(p)
-				segs = append(segs, fmt.Sprintf("%sMCP %.0f%%%s", pctColor(p), p, cReset))
-			}
-			if age > 3*quotaTTL {
-				segs = append(segs, cDim+"stale"+cReset)
-			}
-		} else {
-			segs = append(segs, cGray+"quota …"+cReset)
-		}
-		segs = append(segs, cBlue+humanTok(t.total())+" tok"+cReset)
-	default:
-		if !t.SawUsage {
-			segs = append(segs, cRed+"no usage in transcript"+cReset)
-		} else {
-			segs = append(segs, cBlue+humanTok(t.total())+" tok"+cReset)
-			if provider != "local" {
-				cost, cur, conf := estimateCost(modelID, t)
-				if conf == "none" {
-					segs = append(segs, cDim+"价格未填"+cReset)
-				} else {
-					segs = append(segs, cYellow+fmtMoney(cost, cur, conf)+cReset)
-				}
-			}
-		}
-	}
+		return ""
+	},
 
-	disp := loadDisplay()
-	if disp.on(disp.CacheHit, true) {
-		if h, ok := t.cacheHit(); ok {
-			segs = append(segs, fmt.Sprintf("%scache %.0f%%%s", cDim, h, cReset))
+	"tokens": func(c widgetCtx) string {
+		if !c.t.SawUsage {
+			if c.provider == "anthropic" || c.provider == "glm" {
+				return ""
+			}
+			return cRed + "no usage" + cReset
 		}
-	}
-	if disp.on(disp.BurnRate, true) {
-		if b, ok := t.burnRate(); ok {
-			segs = append(segs, fmt.Sprintf("%s%s/min%s", cDim, humanTok(int64(b)), cReset))
-		}
-	}
-	if disp.on(disp.TokenBreakdown, false) && t.SawUsage {
-		segs = append(segs, fmt.Sprintf("%sin %s·out %s·cw %s·cr %s%s",
-			cDim, humanTok(t.Input), humanTok(t.Output),
-			humanTok(t.CacheWrite), humanTok(t.CacheRead), cReset))
-	}
+		return cBlue + humanTok(c.t.total()) + " tok" + cReset
+	},
 
-	if p, limit, src := contextUsage(in, t); p >= 0 {
+	"cost": func(c widgetCtx) string {
+		// 优先用 Claude Code 自己算的花费 —— 它知道真实计费，比我们的价格表可信
+		if v, ok := digRaw(c.raw, "total_cost_usd"); ok {
+			if f, ok := toFloat(v); ok && f > 0 {
+				return cYellow + fmt.Sprintf("$%.3f", f) + cReset
+			}
+		}
+		if c.provider == "anthropic" || c.provider == "glm" || c.provider == "local" {
+			return ""
+		}
+		if !c.t.SawUsage {
+			return ""
+		}
+		cost, cur, conf := estimateCost(c.modelID, c.t)
+		if conf == "none" {
+			return cDim + "价格未填" + cReset
+		}
+		return cYellow + fmtMoney(cost, cur, conf) + cReset
+	},
+
+	"cache": func(c widgetCtx) string {
+		h, ok := c.t.cacheHit()
+		if !ok {
+			return ""
+		}
+		return fmt.Sprintf("%scache %.0f%%%s", cDim, h, cReset)
+	},
+
+	"burn": func(c widgetCtx) string {
+		b, ok := c.t.burnRate()
+		if !ok {
+			return ""
+		}
+		return fmt.Sprintf("%s%s/min%s", cDim, humanTok(int64(b)), cReset)
+	},
+
+	"breakdown": func(c widgetCtx) string {
+		if !c.t.SawUsage {
+			return ""
+		}
+		return fmt.Sprintf("%sin %s·out %s·cw %s·cr %s%s",
+			cDim, humanTok(c.t.Input), humanTok(c.t.Output),
+			humanTok(c.t.CacheWrite), humanTok(c.t.CacheRead), cReset)
+	},
+
+	"ctx": func(c widgetCtx) string {
+		p, limit, src := contextUsage(c.in, c.t)
+		if p < 0 {
+			return ""
+		}
 		mark := ""
 		if src == "guess" {
 			mark = "?"
 		}
-		segs = append(segs, fmt.Sprintf("%sctx %s %.0f%%%s %s%s%s%s",
-			pctColor(p), bar(p, 5), p, cReset, cDim, fmtLimit(limit), mark, cReset))
-	}
+		return fmt.Sprintf("%sctx %s %.0f%%%s %s%s%s%s",
+			pctColor(p), bar(p, 5), p, cReset, cDim, fmtLimit(limit), mark, cReset)
+	},
 
+	// 工具调用次数，按次数降序取前几个。看一眼就知道这个 session 在干嘛。
+	"tools": func(c widgetCtx) string {
+		if len(c.t.Tools) == 0 {
+			return ""
+		}
+		type kv struct {
+			k string
+			v int
+		}
+		xs := make([]kv, 0, len(c.t.Tools))
+		for k, v := range c.t.Tools {
+			xs = append(xs, kv{k, v})
+		}
+		sort.Slice(xs, func(i, j int) bool {
+			if xs[i].v != xs[j].v {
+				return xs[i].v > xs[j].v
+			}
+			return xs[i].k < xs[j].k
+		})
+		n := loadDisplay().toolLimit()
+		if len(xs) > n {
+			xs = xs[:n]
+		}
+		parts := make([]string, 0, len(xs))
+		for _, x := range xs {
+			parts = append(parts, fmt.Sprintf("%s×%d", x.k, x.v))
+		}
+		return cDim + strings.Join(parts, " ") + cReset
+	},
+
+	"msgs": func(c widgetCtx) string {
+		if c.t.Msgs == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%s%d msg%s", cDim, c.t.Msgs, cReset)
+	},
+
+	// 活跃时长，不是墙钟时长 —— 中间去吃饭不计入
+	"duration": func(c widgetCtx) string {
+		if c.t.ActiveSec < 60 {
+			return ""
+		}
+		d := time.Duration(c.t.ActiveSec) * time.Second
+		if d >= time.Hour {
+			return fmt.Sprintf("%s%dh%dm%s", cDim, int(d.Hours()), int(d.Minutes())%60, cReset)
+		}
+		return fmt.Sprintf("%s%dm%s", cDim, int(d.Minutes()), cReset)
+	},
+
+	"dir": func(c widgetCtx) string {
+		d := workspaceDir(c.raw)
+		if d == "" {
+			return ""
+		}
+		return cDim + filepath.Base(d) + cReset
+	},
+
+	// git 分支。直接读 .git/HEAD，不 fork subprocess。
+	"git": func(c widgetCtx) string {
+		b := gitBranch(workspaceDir(c.raw))
+		if b == "" {
+			return ""
+		}
+		return cBlue + "⎇ " + b + cReset
+	},
+
+	// 本次会话改了多少行。Claude Code 自己统计的，有才显示。
+	"lines": func(c widgetCtx) string {
+		add, ok1 := digRaw(c.raw, "total_lines_added")
+		del, ok2 := digRaw(c.raw, "total_lines_removed")
+		if !ok1 && !ok2 {
+			return ""
+		}
+		a, _ := toFloat(add)
+		d, _ := toFloat(del)
+		if a == 0 && d == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%s+%.0f%s/%s-%.0f%s", cGreen, a, cReset, cRed, d, cReset)
+	},
+}
+
+// 单行时的默认顺序。多行由 display.json 的 lines 决定。
+var defaultLine = []string{"model", "quota", "tokens", "cost", "cache", "burn", "ctx"}
+
+func renderGLMQuota() string {
+	q, age := glmQuotaCached()
+	if q == nil {
+		return cGray + "quota …" + cReset
+	}
+	gc := loadGLMConfig()
+	var segs []string
+	p, ok := dig(q, gc.Fields["used_pct"]...)
+	if !ok {
+		used, ok1 := dig(q, gc.Fields["used"]...)
+		total, ok2 := dig(q, gc.Fields["total"]...)
+		if ok1 && ok2 && total > 0 {
+			p, ok = used/total*100, true
+		}
+	}
+	if ok {
+		p = normPct(p)
+		segs = append(segs, fmt.Sprintf("%s5h %s %.0f%%%s", pctColor(p), bar(p, 5), p, cReset))
+	} else {
+		segs = append(segs, cRed+"字段未匹配"+cReset)
+	}
+	if p, ok := dig(q, gc.Fields["mcp_pct"]...); ok {
+		p = normPct(p)
+		segs = append(segs, fmt.Sprintf("%sMCP %.0f%%%s", pctColor(p), p, cReset))
+	}
+	if age > 3*quotaTTL {
+		segs = append(segs, cDim+"stale"+cReset)
+	}
 	return strings.Join(segs, sep)
+}
+
+// digRaw 在 stdin 的原始 map 里递归找一个 key。
+// Claude Code 会往里加字段（cost、行数变更等），结构没固定，宽松取。
+func digRaw(m map[string]interface{}, name string) (interface{}, bool) {
+	if m == nil {
+		return nil, false
+	}
+	if v, ok := m[name]; ok {
+		return v, true
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if sub, ok := m[k].(map[string]interface{}); ok {
+			if v, ok := digRaw(sub, name); ok {
+				return v, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func workspaceDir(m map[string]interface{}) string {
+	for _, k := range []string{"current_dir", "project_dir", "cwd"} {
+		if v, ok := digRaw(m, k); ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// gitBranch 从目录逐级向上找 .git，读 HEAD。不 fork git 进程。
+func gitBranch(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	for i := 0; i < 12 && dir != "/" && dir != "."; i++ {
+		gitPath := filepath.Join(dir, ".git")
+		if fi, err := os.Stat(gitPath); err == nil {
+			head := filepath.Join(gitPath, "HEAD")
+			if fi.Mode().IsRegular() {
+				// worktree / submodule：.git 是文件，内容为 gitdir: <path>
+				b, err := os.ReadFile(gitPath)
+				if err != nil {
+					return ""
+				}
+				line := strings.TrimSpace(string(b))
+				if !strings.HasPrefix(line, "gitdir:") {
+					return ""
+				}
+				head = filepath.Join(strings.TrimSpace(strings.TrimPrefix(line, "gitdir:")), "HEAD")
+			}
+			b, err := os.ReadFile(head)
+			if err != nil {
+				return ""
+			}
+			line := strings.TrimSpace(string(b))
+			if ref := strings.TrimPrefix(line, "ref: refs/heads/"); ref != line {
+				return ref
+			}
+			if len(line) >= 7 {
+				return line[:7] // detached HEAD
+			}
+			return ""
+		}
+		dir = filepath.Dir(dir)
+	}
+	return ""
+}
+
+func render(in input, raw map[string]interface{}) string {
+	provider, _ := detectProvider()
+	modelID := in.Model.ID
+	if modelID == "" {
+		modelID = in.Model.DisplayName
+	}
+	t, _ := scanTranscript(in.TranscriptPath)
+	c := widgetCtx{in: in, raw: raw, t: t, provider: provider, modelID: modelID}
+
+	layout := loadDisplay().layout()
+	out := make([]string, 0, len(layout))
+	for _, row := range layout {
+		segs := make([]string, 0, len(row))
+		for _, name := range row {
+			fn, ok := widgets[name]
+			if !ok {
+				continue
+			}
+			if s := fn(c); s != "" {
+				segs = append(segs, s)
+			}
+		}
+		if len(segs) > 0 {
+			out = append(out, strings.Join(segs, sep))
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,6 +1348,56 @@ func latestTranscript() (string, time.Time) {
 		return nil
 	})
 	return best, bestT
+}
+
+// ---------------------------------------------------------------------------
+// --dump-input：列出最近一次 statusline 输入的全部字段
+// ---------------------------------------------------------------------------
+
+func cmdDumpInput() {
+	b, err := os.ReadFile(lastInput)
+	if err != nil {
+		fmt.Println("还没有样本。跑一轮对话让 statusline 渲染一次再来。")
+		return
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(b, &m) != nil {
+		fmt.Println("样本不是合法 JSON:", lastInput)
+		return
+	}
+	fmt.Println("===== 最近一次 statusline 输入 =====")
+	fmt.Println()
+	fmt.Println("Claude Code 会不定期往这里加字段。下面是这次实际收到的全部内容，")
+	fmt.Println("看到有用的就加个 widget —— 不用猜，也不用查文档。")
+	fmt.Println()
+	dumpKeys(m, "")
+	fmt.Println()
+	fmt.Printf("完整样本: %s\n", lastInput)
+}
+
+func dumpKeys(m map[string]interface{}, prefix string) {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		path := k
+		if prefix != "" {
+			path = prefix + "." + k
+		}
+		switch v := m[k].(type) {
+		case map[string]interface{}:
+			fmt.Printf("  %-34s {…}\n", path)
+			dumpKeys(v, path)
+		case []interface{}:
+			fmt.Printf("  %-34s [%d 项]\n", path, len(v))
+		case string:
+			fmt.Printf("  %-34s %q\n", path, truncate(v, 60))
+		default:
+			fmt.Printf("  %-34s %v\n", path, v)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,6 +1667,9 @@ func main() {
 			return
 		case "--probe-glm":
 			cmdProbeGLM()
+			return
+		case "--dump-input":
+			cmdDumpInput()
 			return
 		case "--refresh-quota":
 			glmQuotaRefresh()
