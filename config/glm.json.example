@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "智谱额度接口配置。国内站(open.bigmodel.cn)和海外站(z.ai)是两套域名，",
+    "端点路径、鉴权方式、响应字段都可能不同，且没有公开确认过，所以不硬编码。",
+    "跑一次探测拿到真实情况后填这里，改完不用重新编译：",
+    "  ~/.config/claude-statusline/claude-statusline --probe-glm",
+    "auth_scheme: raw = Authorization: <token>；bearer = Authorization: Bearer <token>",
+    "fields 里每项是候选名列表，dig 递归取第一个命中（大小写不敏感）。",
+    "",
+    "实测字段映射（2026-08-10 探测）：",
+    "  响应是 data.data.limits[] 数组，三个限额各带一个 percentage，无法用名字直接区分。",
+    "  used_pct = percentage  -> 取数组第一个 = TOKENS_LIMIT unit3（≈5h 滚动窗），对上渲染的 '5h' 标签。",
+    "  mcp_pct  = currentValue-> 只有 TIME_LIMIT unit5（月度工具调用 search-prime/web-reader/zread）带这个字段。",
+    "  used/total 候选在此响应里都不存在，仅作 used_pct 命中失败时的兜底（当前不会触发）。",
+    "  ⚠️ 依赖数组顺序：unit3 必须排在 limits[] 第一位。若智谱改顺序，used_pct 会取到别的窗口——",
+    "     要彻底稳，得给 dig 加「按兄弟字段值过滤」（如 percentage where type==TOKENS_LIMIT && unit==3）。"
+  ],
+  "endpoint": "https://open.bigmodel.cn/api/monitor/usage/quota/limit",
+  "auth_scheme": "raw",
+  "fields": {
+    "used_pct": ["percentage"],
+    "used": ["used", "used_tokens", "usedTokens", "currentValue"],
+    "total": ["total", "limit", "quota", "total_tokens"],
+    "mcp_pct": ["currentValue"]
+  }
+}

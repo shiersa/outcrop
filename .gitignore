@@ -1,0 +1,17 @@
+# 编译产物
+/bin/
+claude-statusline
+*.bak-*
+*.prepatch*
+
+# 运行时状态不进版本控制
+cache/
+last-input.json
+
+# 真实配置不进版本控制（config/*.example 才是模板）
+config/pricing.json
+config/context_windows.json
+config/display.json
+config/glm.json
+
+.DS_Store

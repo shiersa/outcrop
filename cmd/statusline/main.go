@@ -1,0 +1,1358 @@
+// claude-statusline —— 按 provider 分派的 Claude Code statusline。
+//
+// 相比 Python 版的三处实质改进：
+//  1. transcript 增量扫描。缓存 (size, mtime) 与累计值，只解析新增字节。
+//     长会话下这是数量级的差别，而不是换语言带来的常数倍。
+//  2. 单个静态二进制。没有解释器版本、PATH、虚拟环境的问题 ——
+//     同一台机器上 python3 解析到不同版本这种事不会再发生。
+//  3. 永不 panic。statusline 崩了整行就没了，顶层 recover 兜底。
+//
+// 只用标准库，go build 不需要联网拉依赖。
+package main
+
+import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ---------------------------------------------------------------------------
+// 路径与常量
+// ---------------------------------------------------------------------------
+
+var (
+	home     = must(os.UserHomeDir())
+	baseDir  = filepath.Join(configHome(), "claude-statusline")
+	cacheDir = filepath.Join(baseDir, "cache")
+
+	pricingPath = filepath.Join(baseDir, "pricing.json")
+	ctxWinPath  = filepath.Join(baseDir, "context_windows.json")
+	displayPath = filepath.Join(baseDir, "display.json")
+	glmCfgPath  = filepath.Join(baseDir, "glm.json")
+	lastInput   = filepath.Join(cacheDir, "last-input.json")
+	glmCache    = filepath.Join(cacheDir, "glm_quota.json")
+)
+
+const (
+	quotaTTL   = 5 * time.Minute
+	netTimeout = 4 * time.Second
+)
+
+// 智谱国内站与海外站(z.ai)是两套域名，端点路径和鉴权方式都可能不同，
+// 而且响应结构没有公开确认。所以不硬编码 —— 用 --probe-glm 探测出
+// 真实情况后写进 glm.json，改配置即可生效，不用重新编译。
+var glmDefaultEndpoints = []string{
+	"https://open.bigmodel.cn/api/monitor/usage/quota/limit",
+	"https://api.z.ai/api/monitor/usage/quota/limit",
+}
+
+type glmConfig struct {
+	Endpoint   string              `json:"endpoint"`
+	AuthScheme string              `json:"auth_scheme"` // raw | bearer
+	Fields     map[string][]string `json:"fields"`
+}
+
+func loadGLMConfig() glmConfig {
+	var c glmConfig
+	_ = loadJSON(glmCfgPath, &c)
+	if c.Endpoint == "" {
+		c.Endpoint = glmDefaultEndpoints[0]
+	}
+	if c.AuthScheme == "" {
+		c.AuthScheme = "raw"
+	}
+	if c.Fields == nil {
+		c.Fields = map[string][]string{}
+	}
+	for k, v := range map[string][]string{
+		"used_pct": {"used_pct", "usedPercent", "percent", "usage_rate"},
+		"used":     {"used", "used_tokens", "usedTokens"},
+		"total":    {"total", "limit", "quota", "total_tokens"},
+		"mcp_pct":  {"mcp_used_pct", "mcpPercent", "mcp_usage"},
+	} {
+		if _, ok := c.Fields[k]; !ok {
+			c.Fields[k] = v
+		}
+	}
+	return c
+}
+
+func glmAuthHeader(scheme, token string) (string, string) {
+	if strings.EqualFold(scheme, "bearer") {
+		return "Authorization", "Bearer " + token
+	}
+	return "Authorization", token
+}
+
+const (
+	cReset  = "\033[0m"
+	cDim    = "\033[38;5;240m"
+	cGray   = "\033[38;5;245m"
+	cGreen  = "\033[38;5;114m"
+	cYellow = "\033[38;5;214m"
+	cRed    = "\033[38;5;203m"
+	cBlue   = "\033[38;5;109m"
+	cMag    = "\033[38;5;176m"
+)
+
+var sep = cDim + " │ " + cReset
+
+func configHome() string {
+	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
+		return v
+	}
+	return filepath.Join(home, ".config")
+}
+
+func must(s string, err error) string {
+	if err != nil {
+		return os.Getenv("HOME")
+	}
+	return s
+}
+
+// ---------------------------------------------------------------------------
+// 输入结构
+// ---------------------------------------------------------------------------
+
+type contextWindow struct {
+	TotalInput  int64    `json:"total_input_tokens"`
+	TotalOutput int64    `json:"total_output_tokens"`
+	Size        int64    `json:"context_window_size"`
+	UsedPct     *float64 `json:"used_percentage"`
+}
+
+type input struct {
+	Model struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
+	} `json:"model"`
+	TranscriptPath string          `json:"transcript_path"`
+	ContextWindow  *contextWindow  `json:"context_window"`
+	RateLimits     json.RawMessage `json:"rate_limits"`
+}
+
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
+
+func bar(pct float64, width int) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	filled := int(pct/100*float64(width) + 0.5)
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+func pctColor(pct float64) string {
+	switch {
+	case pct >= 91:
+		return cRed
+	case pct >= 81:
+		return cYellow
+	default:
+		return cGreen
+	}
+}
+
+func humanTok(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1000:
+		return fmt.Sprintf("%.1fK", float64(n)/1e3)
+	}
+	return strconv.FormatInt(n, 10)
+}
+
+func fmtLimit(n int64) string {
+	if n >= 1_000_000 {
+		v := float64(n) / 1e6
+		if v == float64(int64(v)) {
+			return fmt.Sprintf("%.0fM", v)
+		}
+		return fmt.Sprintf("%.1fM", v)
+	}
+	return fmt.Sprintf("%dK", n/1000)
+}
+
+func loadJSON(path string, v interface{}) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, v)
+}
+
+func saveJSON(path string, v interface{}) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// ---------------------------------------------------------------------------
+// provider 路由
+// ---------------------------------------------------------------------------
+
+func detectProvider() (string, string) {
+	base := strings.ToLower(os.Getenv("ANTHROPIC_BASE_URL"))
+	switch {
+	case base == "" || strings.Contains(base, "api.anthropic.com"):
+		return "anthropic", base
+	case strings.Contains(base, "bigmodel.cn"), strings.Contains(base, "z.ai"),
+		strings.Contains(base, "zhipu"):
+		return "glm", base
+	case strings.Contains(base, "deepseek"):
+		return "deepseek", base
+	case strings.Contains(base, "127.0.0.1"), strings.Contains(base, "localhost"),
+		strings.Contains(base, "0.0.0.0"), strings.Contains(base, "[::1]"):
+		return "local", base
+	case strings.Contains(base, "openai"):
+		return "openai", base
+	}
+	return "generic", base
+}
+
+// ---------------------------------------------------------------------------
+// transcript 增量扫描
+// ---------------------------------------------------------------------------
+
+type totals struct {
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cache_read"`
+	CacheWrite int64 `json:"cache_write"`
+	Ctx        int64 `json:"ctx"`
+	Msgs       int   `json:"msgs"`
+
+	// 燃烧速率用：只累加相邻消息间隔 <= idleGapMax 的部分，
+	// 这样中间去吃个饭不会把速率稀释成毫无意义的数字
+	LastTS    int64 `json:"last_ts"`
+	ActiveSec int64 `json:"active_sec"`
+	SawUsage  bool  `json:"saw_usage"`
+	SawCache  bool  `json:"saw_cache"`
+
+	// 增量游标
+	Offset  int64  `json:"offset"`
+	ModTime int64  `json:"mtime"`
+	Head    string `json:"head"` // 文件首 64 字节的指纹，防日志轮转后错位续读
+}
+
+// headPrint 取文件开头 64 字节的哈希。文件被替换或重写时该值会变，
+// 此时即使 offset <= size 也必须全量重扫。
+func headPrint(f *os.File) string {
+	buf := make([]byte, 64)
+	n, _ := f.ReadAt(buf, 0)
+	if n <= 0 {
+		return ""
+	}
+	h := sha256.Sum256(buf[:n])
+	return fmt.Sprintf("%x", h[:6])
+}
+
+func (t totals) total() int64 {
+	return t.Input + t.Output + t.CacheRead + t.CacheWrite
+}
+
+// billable 排除 cache_read。缓存读在 token 数上占绝对多数（常见九成以上），
+// 算进速率会让数字大到失去参考意义。
+func (t totals) billable() int64 {
+	return t.Input + t.Output + t.CacheWrite
+}
+
+// cacheHit 是提示词 token 里由缓存供给的比例。输出 token 不参与。
+func (t totals) cacheHit() (float64, bool) {
+	prompt := t.Input + t.CacheRead + t.CacheWrite
+	if prompt == 0 {
+		return 0, false
+	}
+	return float64(t.CacheRead) / float64(prompt) * 100, true
+}
+
+// burnRate 用活跃时长而非墙钟时长，空闲不稀释。
+func (t totals) burnRate() (float64, bool) {
+	if t.ActiveSec < 30 {
+		return 0, false
+	}
+	return float64(t.billable()) / (float64(t.ActiveSec) / 60), true
+}
+
+const idleGapMax = 300 // 秒。超过这个间隔视为离开，不计入活跃时长
+
+type txRecord struct {
+	IsSidechain bool   `json:"isSidechain"`
+	Timestamp   string `json:"timestamp"`
+	Message     *struct {
+		Usage *struct {
+			Input       int64 `json:"input_tokens"`
+			Output      int64 `json:"output_tokens"`
+			CacheRead   int64 `json:"cache_read_input_tokens"`
+			CacheCreate int64 `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+}
+
+func scanCachePath(transcript string) string {
+	h := sha256.Sum256([]byte(transcript))
+	return filepath.Join(cacheDir, fmt.Sprintf("tx-%x.json", h[:8]))
+}
+
+// scanTranscript 只解析自上次以来新增的字节。
+// 文件被截断或替换（size 变小）时退回全量重扫。
+func scanTranscript(path string) (totals, bool) {
+	var t totals
+	if path == "" {
+		return t, false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return t, false
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return t, false
+	}
+	defer f.Close()
+
+	head := headPrint(f)
+
+	cp := scanCachePath(path)
+	var cached totals
+	incremental := false
+	if err := loadJSON(cp, &cached); err == nil {
+		// 三个条件缺一不可：游标没越界、时间没倒流、文件头没变
+		if cached.Offset <= fi.Size() &&
+			cached.ModTime <= fi.ModTime().Unix() &&
+			cached.Head == head {
+			t = cached
+			incremental = true
+		}
+	}
+
+	start := int64(0)
+	if incremental {
+		start = t.Offset
+	} else {
+		t = totals{}
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return t, false
+	}
+
+	r := bufio.NewReaderSize(f, 1<<20)
+	consumed := start
+	for {
+		line, err := r.ReadBytes('\n')
+		if err != nil {
+			// 末尾半行（正在写入）不消费，下次从这里继续
+			break
+		}
+		consumed += int64(len(line))
+
+		trimmed := strings.TrimSpace(string(line))
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			continue
+		}
+		var rec txRecord
+		if json.Unmarshal([]byte(trimmed), &rec) != nil {
+			continue
+		}
+		// subagent 的消息也写在同一份 JSONL 里，算进 ctx 会让数字随
+		// subagent 起落而跳动
+		if rec.IsSidechain || rec.Message == nil || rec.Message.Usage == nil {
+			continue
+		}
+		u := rec.Message.Usage
+		t.SawUsage = true
+		t.Msgs++
+		t.Input += u.Input
+		t.Output += u.Output
+		t.CacheRead += u.CacheRead
+		t.CacheWrite += u.CacheCreate
+		if u.CacheRead > 0 || u.CacheCreate > 0 {
+			t.SawCache = true
+		}
+		if c := u.Input + u.CacheRead + u.CacheCreate; c > 0 {
+			t.Ctx = c
+		}
+		if rec.Timestamp != "" {
+			if ts, err := time.Parse(time.RFC3339, rec.Timestamp); err == nil {
+				sec := ts.Unix()
+				if t.LastTS > 0 {
+					if gap := sec - t.LastTS; gap > 0 && gap <= idleGapMax {
+						t.ActiveSec += gap
+					}
+				}
+				t.LastTS = sec
+			}
+		}
+	}
+
+	t.Offset = consumed
+	t.ModTime = fi.ModTime().Unix()
+	t.Head = head
+	_ = saveJSON(cp, t)
+	return t, incremental
+}
+
+// ---------------------------------------------------------------------------
+// 上下文占用
+// ---------------------------------------------------------------------------
+
+type ctxWinConfig struct {
+	Default int64            `json:"default"`
+	Models  map[string]int64 `json:"models"`
+}
+
+// contextLimit 返回 (窗口大小, 是否确定)。
+// 注意不要拿 exceeds_200k_tokens 当 1M 窗口的代理 —— 它字面意思只是
+// "已经超过 200k"，拿来切分母会导致越线瞬间百分比暴跌。
+func contextLimit(in input) (int64, bool) {
+	var cfg ctxWinConfig
+	_ = loadJSON(ctxWinPath, &cfg)
+	def := cfg.Default
+	if def <= 0 {
+		def = 200_000
+	}
+
+	id := strings.ToLower(strings.TrimSpace(in.Model.ID))
+
+	if v, ok := cfg.Models[in.Model.ID]; ok && v > 0 {
+		return v, true
+	}
+	for k, v := range cfg.Models {
+		if strings.EqualFold(k, id) && v > 0 {
+			return v, true
+		}
+	}
+	// 子串匹配取最长 key，避免 glm-5 抢在 glm-5.2 前面
+	bestLen, bestVal := 0, int64(0)
+	keys := make([]string, 0, len(cfg.Models))
+	for k := range cfg.Models {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		kl := strings.ToLower(k)
+		if kl == "" {
+			continue
+		}
+		if strings.Contains(id, kl) || strings.Contains(kl, id) {
+			if len(kl) > bestLen && cfg.Models[k] > 0 {
+				bestLen, bestVal = len(kl), cfg.Models[k]
+			}
+		}
+	}
+	if bestVal > 0 {
+		return bestVal, true
+	}
+
+	blob := strings.ReplaceAll(id+" "+strings.ToLower(in.Model.DisplayName), " ", "")
+	for _, m := range []string{"[1m]", "1mcontext", "1mtoken"} {
+		if strings.Contains(blob, m) {
+			return 1_000_000, true
+		}
+	}
+	return def, false
+}
+
+// contextUsage 优先信任 Claude Code 原生的 context_window（v2.1.132+）。
+// 该版本以前传的是会话累计而非当前上下文，表现为百分比超过 100%，
+// 据此判定不可信并退回本地推算。
+func contextUsage(in input, t totals) (float64, int64, string) {
+	if cw := in.ContextWindow; cw != nil && cw.Size > 0 {
+		var p float64 = -1
+		if cw.UsedPct != nil {
+			p = *cw.UsedPct
+		} else if cw.TotalInput+cw.TotalOutput > 0 {
+			p = float64(cw.TotalInput+cw.TotalOutput) / float64(cw.Size) * 100
+		}
+		if p >= 0 && p <= 100 {
+			return p, cw.Size, "native"
+		}
+	}
+	limit, known := contextLimit(in)
+	if t.Ctx == 0 {
+		return -1, limit, "none"
+	}
+	src := "guess"
+	if known {
+		src = "map"
+	}
+	return float64(t.Ctx) / float64(limit) * 100, limit, src
+}
+
+// ---------------------------------------------------------------------------
+// 显示开关
+// ---------------------------------------------------------------------------
+
+type displayConfig struct {
+	CacheHit       *bool `json:"cacheHit"`
+	BurnRate       *bool `json:"burnRate"`
+	TokenBreakdown *bool `json:"tokenBreakdown"`
+}
+
+func (d displayConfig) on(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
+func loadDisplay() displayConfig {
+	var d displayConfig
+	_ = loadJSON(displayPath, &d)
+	return d
+}
+
+// ---------------------------------------------------------------------------
+// 计价
+// ---------------------------------------------------------------------------
+
+type modelPrice struct {
+	Input      *float64 `json:"input"`
+	Output     *float64 `json:"output"`
+	CacheRead  *float64 `json:"cache_read"`
+	CacheWrite *float64 `json:"cache_write"`
+	Currency   string   `json:"currency"`
+}
+
+type pricingConfig struct {
+	Correction map[string]float64    `json:"correction_factor"`
+	Models     map[string]modelPrice `json:"models"`
+}
+
+// estimateCost 返回 (金额, 币种, 可信度)。
+// 任一必需字段缺失就不出金额 —— 宁可不显示，也不显示一个错的。
+func estimateCost(modelID string, t totals) (float64, string, string) {
+	var cfg pricingConfig
+	if loadJSON(pricingPath, &cfg) != nil {
+		return 0, "", "none"
+	}
+	id := strings.ToLower(modelID)
+	var entry modelPrice
+	var key string
+	for k, v := range cfg.Models {
+		kl := strings.ToLower(k)
+		if strings.Contains(id, kl) || strings.Contains(kl, id) {
+			entry, key = v, k
+			break
+		}
+	}
+	if key == "" || entry.Input == nil || entry.Output == nil {
+		return 0, "", "none"
+	}
+	cr, cw := *entry.Input, *entry.Input
+	if entry.CacheRead != nil {
+		cr = *entry.CacheRead
+	}
+	if entry.CacheWrite != nil {
+		cw = *entry.CacheWrite
+	}
+	cost := (float64(t.Input)**entry.Input +
+		float64(t.Output)**entry.Output +
+		float64(t.CacheRead)*cr +
+		float64(t.CacheWrite)*cw) / 1e6
+
+	conf := "estimate"
+	if f, ok := cfg.Correction[key]; ok && f > 0 {
+		cost *= f
+		conf = "calibrated"
+	}
+	cur := entry.Currency
+	if cur == "" {
+		cur = "USD"
+	}
+	return cost, cur, conf
+}
+
+func fmtMoney(cost float64, cur, conf string) string {
+	sym := map[string]string{"USD": "$", "CNY": "¥"}[cur]
+	if conf == "calibrated" {
+		return fmt.Sprintf("%s%.3f", sym, cost)
+	}
+	return fmt.Sprintf("~%s%.3f*", sym, cost)
+}
+
+// ---------------------------------------------------------------------------
+// 智谱额度：后台刷新 + 缓存，主路径永不等网络
+// ---------------------------------------------------------------------------
+
+type quotaBlob struct {
+	TS    int64           `json:"ts"`
+	Data  json.RawMessage `json:"data"`
+	Error string          `json:"error,omitempty"`
+}
+
+func glmQuotaCached() (map[string]interface{}, time.Duration) {
+	var blob quotaBlob
+	_ = loadJSON(glmCache, &blob)
+	age := time.Since(time.Unix(blob.TS, 0))
+	if age > quotaTTL {
+		if exe, err := os.Executable(); err == nil {
+			cmd := exec.Command(exe, "--refresh-quota")
+			cmd.Stdout, cmd.Stderr, cmd.Stdin = nil, nil, nil
+			_ = cmd.Start()
+			go func() { _ = cmd.Wait() }()
+		}
+	}
+	if len(blob.Data) == 0 {
+		return nil, age
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(blob.Data, &m) != nil {
+		return nil, age
+	}
+	return m, age
+}
+
+func glmQuotaRefresh() {
+	token := os.Getenv("ANTHROPIC_AUTH_TOKEN")
+	if token == "" {
+		token = os.Getenv("ZHIPU_API_KEY")
+	}
+	if token == "" {
+		return
+	}
+	cfg := loadGLMConfig()
+	req, err := http.NewRequest("GET", cfg.Endpoint, nil)
+	if err != nil {
+		return
+	}
+	hk, hv := glmAuthHeader(cfg.AuthScheme, token)
+	req.Header.Set(hk, hv)
+	req.Header.Set("Accept", "application/json")
+	client := &http.Client{Timeout: netTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		_ = saveJSON(glmCache, quotaBlob{TS: time.Now().Unix(), Error: err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return
+	}
+	_ = saveJSON(glmCache, quotaBlob{TS: time.Now().Unix(), Data: body})
+}
+
+// dig 在嵌套结构里找第一个匹配的 key。
+// 响应结构未公开确认，所以宽松匹配 —— 跑 --verify 看真实字段名。
+func dig(obj interface{}, names ...string) (float64, bool) {
+	switch v := obj.(type) {
+	case map[string]interface{}:
+		for _, n := range names {
+			for k, val := range v {
+				if strings.EqualFold(k, n) {
+					if f, ok := toFloat(val); ok {
+						return f, true
+					}
+				}
+			}
+		}
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if f, ok := dig(v[k], names...); ok {
+				return f, true
+			}
+		}
+	case []interface{}:
+		for _, val := range v {
+			if f, ok := dig(val, names...); ok {
+				return f, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func toFloat(v interface{}) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case int64:
+		return float64(x), true
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSuffix(x, "%"), 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+func normPct(p float64) float64 {
+	if p <= 1.0 {
+		return p * 100
+	}
+	return p
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic 原生 rate_limits
+// ---------------------------------------------------------------------------
+
+func renderRateLimits(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(raw, &m) != nil {
+		return ""
+	}
+	var segs []string
+	for _, pair := range []struct {
+		label string
+		keys  []string
+	}{
+		{"5h", []string{"five_hour", "session", "primary"}},
+		{"wk", []string{"seven_day", "weekly", "secondary"}},
+	} {
+		var node interface{}
+		for _, k := range pair.keys {
+			if v, ok := m[k]; ok {
+				node = v
+				break
+			}
+		}
+		if node == nil {
+			continue
+		}
+		p, ok := dig(node, "used_pct", "utilization", "percent_used", "used_percent")
+		if !ok {
+			used, ok1 := dig(node, "used", "used_tokens")
+			lim, ok2 := dig(node, "limit", "total", "max")
+			if !ok1 || !ok2 || lim == 0 {
+				continue
+			}
+			p = used / lim * 100
+		}
+		p = normPct(p)
+		segs = append(segs, fmt.Sprintf("%s%s %s %.0f%%%s",
+			pctColor(p), pair.label, bar(p, 5), p, cReset))
+	}
+	return strings.Join(segs, sep)
+}
+
+// ---------------------------------------------------------------------------
+// 渲染
+// ---------------------------------------------------------------------------
+
+func render(in input, raw map[string]interface{}) string {
+	provider, _ := detectProvider()
+	name := in.Model.DisplayName
+	if name == "" {
+		name = in.Model.ID
+	}
+	if name == "" {
+		name = "?"
+	}
+	modelID := in.Model.ID
+	if modelID == "" {
+		modelID = name
+	}
+
+	t, _ := scanTranscript(in.TranscriptPath)
+	segs := []string{cMag + name + cReset}
+
+	switch provider {
+	case "anthropic":
+		if s := renderRateLimits(in.RateLimits); s != "" {
+			segs = append(segs, s)
+		} else {
+			segs = append(segs, cGray+"quota n/a"+cReset)
+		}
+	case "glm":
+		q, age := glmQuotaCached()
+		if q != nil {
+			gc := loadGLMConfig()
+			p, ok := dig(q, gc.Fields["used_pct"]...)
+			if !ok {
+				// 没有现成的百分比就用 used/total 算
+				used, ok1 := dig(q, gc.Fields["used"]...)
+				total, ok2 := dig(q, gc.Fields["total"]...)
+				if ok1 && ok2 && total > 0 {
+					p, ok = used/total*100, true
+				}
+			}
+			if ok {
+				p = normPct(p)
+				segs = append(segs, fmt.Sprintf("%s5h %s %.0f%%%s",
+					pctColor(p), bar(p, 5), p, cReset))
+			} else {
+				segs = append(segs, cRed+"字段未匹配"+cReset)
+			}
+			if p, ok := dig(q, gc.Fields["mcp_pct"]...); ok {
+				p = normPct(p)
+				segs = append(segs, fmt.Sprintf("%sMCP %.0f%%%s", pctColor(p), p, cReset))
+			}
+			if age > 3*quotaTTL {
+				segs = append(segs, cDim+"stale"+cReset)
+			}
+		} else {
+			segs = append(segs, cGray+"quota …"+cReset)
+		}
+		segs = append(segs, cBlue+humanTok(t.total())+" tok"+cReset)
+	default:
+		if !t.SawUsage {
+			segs = append(segs, cRed+"no usage in transcript"+cReset)
+		} else {
+			segs = append(segs, cBlue+humanTok(t.total())+" tok"+cReset)
+			if provider != "local" {
+				cost, cur, conf := estimateCost(modelID, t)
+				if conf == "none" {
+					segs = append(segs, cDim+"价格未填"+cReset)
+				} else {
+					segs = append(segs, cYellow+fmtMoney(cost, cur, conf)+cReset)
+				}
+			}
+		}
+	}
+
+	disp := loadDisplay()
+	if disp.on(disp.CacheHit, true) {
+		if h, ok := t.cacheHit(); ok {
+			segs = append(segs, fmt.Sprintf("%scache %.0f%%%s", cDim, h, cReset))
+		}
+	}
+	if disp.on(disp.BurnRate, true) {
+		if b, ok := t.burnRate(); ok {
+			segs = append(segs, fmt.Sprintf("%s%s/min%s", cDim, humanTok(int64(b)), cReset))
+		}
+	}
+	if disp.on(disp.TokenBreakdown, false) && t.SawUsage {
+		segs = append(segs, fmt.Sprintf("%sin %s·out %s·cw %s·cr %s%s",
+			cDim, humanTok(t.Input), humanTok(t.Output),
+			humanTok(t.CacheWrite), humanTok(t.CacheRead), cReset))
+	}
+
+	if p, limit, src := contextUsage(in, t); p >= 0 {
+		mark := ""
+		if src == "guess" {
+			mark = "?"
+		}
+		segs = append(segs, fmt.Sprintf("%sctx %s %.0f%%%s %s%s%s%s",
+			pctColor(p), bar(p, 5), p, cReset, cDim, fmtLimit(limit), mark, cReset))
+	}
+
+	return strings.Join(segs, sep)
+}
+
+// ---------------------------------------------------------------------------
+// --verify
+// ---------------------------------------------------------------------------
+
+func cmdVerify() {
+	fmt.Println("===== statusline router 自检 =====")
+	fmt.Println()
+
+	provider, base := detectProvider()
+	fmt.Println("1. provider 路由")
+	if base == "" {
+		fmt.Println("   ANTHROPIC_BASE_URL = <未设置 -> 判定为 anthropic>")
+	} else {
+		fmt.Printf("   ANTHROPIC_BASE_URL = %s\n", base)
+	}
+	fmt.Printf("   -> 判定为: %s\n\n", provider)
+
+	fmt.Println("2. pricing.json")
+	var pc pricingConfig
+	if err := loadJSON(pricingPath, &pc); err != nil {
+		fmt.Printf("   ✗ 读取失败: %v\n\n", err)
+	} else {
+		var filled, empty []string
+		for k, v := range pc.Models {
+			if v.Input != nil && v.Output != nil {
+				filled = append(filled, k)
+			} else {
+				empty = append(empty, k)
+			}
+		}
+		sort.Strings(filled)
+		sort.Strings(empty)
+		fmt.Printf("   已填价格: %s\n", orNone(filled))
+		fmt.Printf("   待填价格: %s\n\n", orNone(empty))
+	}
+
+	fmt.Println("3. transcript / usage 字段")
+	latest, mt := latestTranscript()
+	if latest == "" {
+		fmt.Println("   ⚠️  没找到任何 transcript，先跑一轮对话再来")
+		fmt.Println()
+	} else {
+		// 先清掉缓存测全量，再测增量，把差距显示出来
+		_ = os.Remove(scanCachePath(latest))
+		s1 := time.Now()
+		t, _ := scanTranscript(latest)
+		full := time.Since(s1)
+		s2 := time.Now()
+		_, inc := scanTranscript(latest)
+		incr := time.Since(s2)
+
+		fi, _ := os.Stat(latest)
+		fmt.Printf("   最近的 transcript: %s\n", latest)
+		if fi != nil {
+			fmt.Printf("   大小: %.1f MB，最后修改: %s\n",
+				float64(fi.Size())/(1<<20), mt.Format("2006-01-02 15:04"))
+		}
+		fmt.Printf("   记录到 usage 的消息数: %d\n", t.Msgs)
+		fmt.Printf("   全量扫描 %v，增量扫描 %v", full.Round(time.Microsecond), incr.Round(time.Microsecond))
+		if inc && full > 0 {
+			fmt.Printf("（快 %.0f 倍）", float64(full)/float64(maxDur(incr, time.Microsecond)))
+		}
+		fmt.Println()
+
+		if !t.SawUsage {
+			fmt.Println("   ✗ 完全没有 usage 字段")
+			fmt.Println("      -> 后端/shim 没回 usage，token 数会恒为 0。")
+			fmt.Println("      -> 本地模型走 MLX shim 的话，这是最可能的坑。")
+		} else {
+			fmt.Printf("   ✓ input=%d output=%d cache_read=%d cache_write=%d\n",
+				t.Input, t.Output, t.CacheRead, t.CacheWrite)
+			if !t.SawCache {
+				fmt.Println("   ⚠️  cache_read / cache_write 全为 0")
+				fmt.Println("      -> 要么这个 session 真的没命中缓存，")
+				fmt.Println("      -> 要么协议转换层把 cache 字段丢了。")
+				fmt.Println("      -> 后者会让 DeepSeek 成本虚高约一个数量级（缓存价差 10 倍），")
+				fmt.Println("         多跑几轮长会话再看，仍为 0 就按上限估算处理。")
+			} else {
+				fmt.Println("   ✓ cache 字段有值，成本估算可信")
+			}
+		}
+		fmt.Println()
+	}
+
+	fmt.Println("4. 智谱额度接口")
+	if provider == "glm" {
+		glmQuotaRefresh()
+		var blob quotaBlob
+		if loadJSON(glmCache, &blob) == nil && len(blob.Data) > 0 {
+			fmt.Println("   ✓ 原始响应（字段名以此为准，必要时回来改 dig() 的取值）:")
+			fmt.Println(truncate(prettyJSON(blob.Data), 1500))
+		} else {
+			fmt.Printf("   ✗ 请求失败或没有 ANTHROPIC_AUTH_TOKEN: %s\n", blob.Error)
+		}
+	} else {
+		fmt.Println("   -  当前不在 GLM profile 下，跳过。切到 cc-glm 再跑一次。")
+	}
+	fmt.Println()
+
+	fmt.Println("5. 最近一次 statusline 输入（真实字段，非推测）")
+	b, err := os.ReadFile(lastInput)
+	if err != nil {
+		fmt.Println("   ⚠️  还没有样本。跑一轮对话让 statusline 渲染一次再来。")
+	} else {
+		var m map[string]interface{}
+		_ = json.Unmarshal(b, &m)
+		if cw, ok := m["context_window"].(map[string]interface{}); ok {
+			fmt.Println("   ✓ context_window 可用:")
+			fmt.Printf("      context_window_size = %v\n", cw["context_window_size"])
+			fmt.Printf("      used_percentage     = %v\n", cw["used_percentage"])
+			fmt.Println("      -> 分母走原生字段，不需要维护 context_windows.json")
+		} else {
+			fmt.Println("   ✗ 没有 context_window 字段")
+			fmt.Println("      -> 退回 context_windows.json，该模型需要手工填窗口大小")
+		}
+		if rl, ok := m["rate_limits"]; ok {
+			rb, _ := json.MarshalIndent(rl, "      ", "  ")
+			fmt.Println("   ✓ rate_limits 原始结构:")
+			fmt.Println("      " + truncate(string(rb), 800))
+			fmt.Println("      字段名跟 renderRateLimits() 对不上就照这个改")
+		} else {
+			fmt.Println("   -  没有 rate_limits（第三方 provider 下属正常）")
+		}
+		fmt.Printf("   完整样本: %s\n", lastInput)
+	}
+	fmt.Println()
+
+	fmt.Println("6. 派生指标")
+	if latest != "" {
+		t, _ := scanTranscript(latest)
+		if h, ok := t.cacheHit(); ok {
+			fmt.Printf("   缓存命中率 %.1f%%\n", h)
+		} else {
+			fmt.Println("   缓存命中率 —— 无提示词 token，算不出")
+		}
+		if b, ok := t.burnRate(); ok {
+			fmt.Printf("   燃烧速率 %.0f tok/min（活跃时长 %s，已剔除 >%ds 的空闲间隔）\n",
+				b, (time.Duration(t.ActiveSec) * time.Second).String(), idleGapMax)
+		} else {
+			fmt.Printf("   燃烧速率 —— 活跃时长不足 30s 或 transcript 无 timestamp 字段\n")
+		}
+		fmt.Printf("   明细 in=%s out=%s cache_write=%s cache_read=%s\n",
+			humanTok(t.Input), humanTok(t.Output), humanTok(t.CacheWrite), humanTok(t.CacheRead))
+	} else {
+		fmt.Println("   -  没有 transcript，跳过")
+	}
+	fmt.Printf("   显示开关: %s\n", displayPath)
+	fmt.Println()
+
+	fmt.Println("===== 自检结束 =====")
+}
+
+func maxDur(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func orNone(s []string) string {
+	if len(s) == 0 {
+		return "（无）"
+	}
+	return strings.Join(s, ", ")
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + " …"
+}
+
+func prettyJSON(raw json.RawMessage) string {
+	var v interface{}
+	if json.Unmarshal(raw, &v) != nil {
+		return string(raw)
+	}
+	b, err := json.MarshalIndent(v, "   ", "  ")
+	if err != nil {
+		return string(raw)
+	}
+	return "   " + string(b)
+}
+
+func latestTranscript() (string, time.Time) {
+	root := filepath.Join(home, ".claude", "projects")
+	var best string
+	var bestT time.Time
+	_ = filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
+		if err != nil || fi == nil || fi.IsDir() || !strings.HasSuffix(p, ".jsonl") {
+			return nil
+		}
+		if fi.ModTime().After(bestT) {
+			best, bestT = p, fi.ModTime()
+		}
+		return nil
+	})
+	return best, bestT
+}
+
+// ---------------------------------------------------------------------------
+// --probe-glm：探测智谱额度接口的真实端点、鉴权方式和字段名
+// ---------------------------------------------------------------------------
+
+func cmdProbeGLM() {
+	fmt.Println("===== 智谱额度接口探测 =====")
+	fmt.Println()
+
+	token := os.Getenv("ANTHROPIC_AUTH_TOKEN")
+	if token == "" {
+		token = os.Getenv("ZHIPU_API_KEY")
+	}
+	if token == "" {
+		fmt.Println("✗ 没有 ANTHROPIC_AUTH_TOKEN / ZHIPU_API_KEY")
+		fmt.Println("   请在 GLM profile 下运行本命令")
+		return
+	}
+	fmt.Printf("   token 前缀 %s…（长度 %d）\n", safePrefix(token), len(token))
+	base := os.Getenv("ANTHROPIC_BASE_URL")
+	fmt.Printf("   ANTHROPIC_BASE_URL = %s\n\n", orEmpty(base))
+
+	cfg := loadGLMConfig()
+	endpoints := []string{}
+	if cfg.Endpoint != "" {
+		endpoints = append(endpoints, cfg.Endpoint)
+	}
+	for _, e := range glmDefaultEndpoints {
+		if !contains(endpoints, e) {
+			endpoints = append(endpoints, e)
+		}
+	}
+
+	type result struct {
+		ep, scheme, body string
+		code             int
+	}
+	var wins []result
+
+	for _, ep := range endpoints {
+		for _, scheme := range []string{"raw", "bearer"} {
+			code, body, err := glmTry(ep, scheme, token)
+			label := fmt.Sprintf("%s  [%s]", ep, scheme)
+			if err != nil {
+				fmt.Printf("   ✗ %s\n      %v\n", label, err)
+				continue
+			}
+			if code == 200 {
+				fmt.Printf("   ✓ %s -> 200\n", label)
+				wins = append(wins, result{ep, scheme, body, code})
+			} else {
+				fmt.Printf("   ✗ %s -> HTTP %d\n      %s\n", label, code, truncate(oneLine(body), 200))
+			}
+		}
+	}
+	fmt.Println()
+
+	if len(wins) == 0 {
+		fmt.Println("✗ 没有可用的组合。")
+		fmt.Println("   可能是端点路径变了，或者你的套餐没有开放这个接口。")
+		fmt.Println("   去 docs.bigmodel.cn/cn/coding-plan 查最新端点，")
+		fmt.Printf("   然后写进 %s 的 endpoint 字段。\n", glmCfgPath)
+		return
+	}
+
+	w := wins[0]
+	fmt.Println("=== 成功的响应（字段名以此为准）===")
+	fmt.Println(truncate(prettyJSON(json.RawMessage(w.body)), 2000))
+	fmt.Println()
+
+	fmt.Println("=== 字段匹配情况 ===")
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(w.body), &m) != nil {
+		fmt.Println("   ⚠️  响应不是 JSON 对象，无法自动匹配")
+		return
+	}
+	allOK := true
+	for _, key := range []string{"used_pct", "used", "total", "mcp_pct"} {
+		if v, ok := dig(m, cfg.Fields[key]...); ok {
+			fmt.Printf("   ✓ %-9s 命中，值 = %v\n", key, v)
+		} else {
+			fmt.Printf("   ✗ %-9s 没匹配上，候选名: %s\n", key, strings.Join(cfg.Fields[key], ", "))
+			if key == "used_pct" || key == "used" {
+				allOK = false
+			}
+		}
+	}
+	fmt.Println()
+
+	if allOK {
+		fmt.Println("✓ 关键字段都能取到，直接写配置即可用。")
+	} else {
+		fmt.Println("⚠️  关键字段没匹配上。从上面的响应里找出对应的 key，")
+		fmt.Println("   加进 glm.json 的 fields 里（是列表，可以多写几个候选）。")
+	}
+	fmt.Println()
+	fmt.Printf("建议写入 %s:\n\n", glmCfgPath)
+	suggested := glmConfig{Endpoint: w.ep, AuthScheme: w.scheme, Fields: cfg.Fields}
+	b, _ := json.MarshalIndent(suggested, "", "  ")
+	fmt.Println(string(b))
+	fmt.Println()
+	fmt.Println("改完不用重新编译，下次渲染就生效。")
+}
+
+func glmTry(endpoint, scheme, token string) (int, string, error) {
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	hk, hv := glmAuthHeader(scheme, token)
+	req.Header.Set(hk, hv)
+	req.Header.Set("Accept", "application/json")
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, string(body), nil
+}
+
+func safePrefix(s string) string {
+	if len(s) <= 6 {
+		return "***"
+	}
+	return s[:6]
+}
+
+func orEmpty(s string) string {
+	if s == "" {
+		return "<未设置>"
+	}
+	return s
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// ---------------------------------------------------------------------------
+// --calibrate
+// ---------------------------------------------------------------------------
+
+type balanceInfo struct {
+	Currency string `json:"currency"`
+	Total    string `json:"total_balance"`
+	Granted  string `json:"granted_balance"`
+	ToppedUp string `json:"topped_up_balance"`
+}
+
+type balanceResp struct {
+	Infos []balanceInfo `json:"balance_infos"`
+}
+
+type balSnapshot struct {
+	TS       int64   `json:"ts"`
+	Total    float64 `json:"total"`
+	Granted  float64 `json:"granted"`
+	ToppedUp float64 `json:"topped_up"`
+	Currency string  `json:"currency"`
+}
+
+func cmdCalibrate() {
+	fmt.Println("===== DeepSeek 余额差分校准 =====")
+	fmt.Println()
+
+	token := os.Getenv("ANTHROPIC_AUTH_TOKEN")
+	if token == "" {
+		token = os.Getenv("DEEPSEEK_API_KEY")
+	}
+	if token == "" {
+		fmt.Println("✗ 没有 ANTHROPIC_AUTH_TOKEN / DEEPSEEK_API_KEY")
+		fmt.Println("   需要在 cc-deepseek profile 下运行")
+		return
+	}
+
+	req, _ := http.NewRequest("GET", "https://api.deepseek.com/user/balance", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Printf("✗ 查询余额失败: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
+	var br balanceResp
+	if json.Unmarshal(body, &br) != nil || len(br.Infos) == 0 {
+		fmt.Println("✗ 响应里没有 balance_infos")
+		return
+	}
+	row := br.Infos[0]
+	cur := balSnapshot{
+		TS:       time.Now().Unix(),
+		Currency: row.Currency,
+		Total:    parseF(row.Total),
+		Granted:  parseF(row.Granted),
+		ToppedUp: parseF(row.ToppedUp),
+	}
+	fmt.Printf("当前余额: %s %.4f （赠送 %.4f / 充值 %.4f）\n",
+		cur.Currency, cur.Total, cur.Granted, cur.ToppedUp)
+
+	snapPath := filepath.Join(cacheDir, "deepseek_balance.json")
+	var prev balSnapshot
+	if loadJSON(snapPath, &prev) != nil || prev.TS == 0 {
+		_ = saveJSON(snapPath, cur)
+		fmt.Println("\n✓ 已记录基线快照。")
+		fmt.Println("  正常用一段时间（建议跑掉几块钱的量）后再跑一次本命令，")
+		fmt.Println("  才能算出真实扣费并回写 correction_factor。")
+		return
+	}
+
+	spent := prev.Total - cur.Total
+	hours := time.Since(time.Unix(prev.TS, 0)).Hours()
+	fmt.Printf("\n距上次快照 %.1f 小时，实际扣费 %s %.4f\n", hours, cur.Currency, spent)
+	if spent <= 0 {
+		fmt.Println("⚠️  扣费为 0 或为负（可能中间充值过）。重置基线，稍后再试。")
+		_ = saveJSON(snapPath, cur)
+		return
+	}
+	fmt.Println("\n本地估算无法自动对齐到同一时间窗（transcript 按 session 分散），")
+	fmt.Println("所以这一步给你数字，由你决定写不写回：")
+	fmt.Println("  1. 打开平台的 per-key usage 导出，取同一时间段的估算总额 E")
+	fmt.Printf("  2. correction_factor = %.4f / E\n", spent)
+	fmt.Printf("  3. 填进 %s 的 correction_factor 里\n", pricingPath)
+	fmt.Println("\n填了之后 statusline 的金额会去掉 ~ 和 * 标记。")
+	_ = saveJSON(snapPath, cur)
+}
+
+func parseF(s string) float64 {
+	f, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return f
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+func main() {
+	// statusline 崩了整行就没了，顶层兜底
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Print(cDim + fmt.Sprintf("statusline panic: %v", r) + cReset)
+		}
+	}()
+
+	_ = os.MkdirAll(cacheDir, 0o700)
+
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--verify":
+			cmdVerify()
+			return
+		case "--calibrate":
+			cmdCalibrate()
+			return
+		case "--probe-glm":
+			cmdProbeGLM()
+			return
+		case "--refresh-quota":
+			glmQuotaRefresh()
+			return
+		case "--version":
+			fmt.Println("claude-statusline (go)")
+			return
+		}
+	}
+
+	raw, _ := io.ReadAll(io.LimitReader(os.Stdin, 8<<20))
+	var in input
+	var m map[string]interface{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &in)
+		_ = json.Unmarshal(raw, &m)
+	}
+	// 留一份最近的 stdin，--verify 靠它报告真实字段名
+	if len(m) > 0 {
+		_ = os.WriteFile(lastInput, raw, 0o600)
+	}
+
+	fmt.Print(render(in, m))
+}

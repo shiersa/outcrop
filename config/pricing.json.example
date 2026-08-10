@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "单价单位：每 1M token 的金额。null = 未填，未填则 statusline 只显示 token 不显示金额。",
+    "各家调价频繁，这里不预填任何数字，请以官方文档为准：",
+    "  DeepSeek  https://api-docs.deepseek.com",
+    "  OpenAI    https://openai.com/api/pricing",
+    "cache_read 通常远低于 input（DeepSeek 上大约是一折），务必单独填，",
+    "留 null 会回退到按 input 价计算，成本会系统性偏高。",
+    "correction_factor 由 --calibrate 指导你填，填了之后金额去掉 ~ 和 * 标记。"
+  ],
+  "correction_factor": {},
+  "models": {
+    "deepseek-chat": {
+      "input": null,
+      "output": null,
+      "cache_read": null,
+      "cache_write": null,
+      "currency": "USD"
+    },
+    "deepseek-reasoner": {
+      "input": null,
+      "output": null,
+      "cache_read": null,
+      "cache_write": null,
+      "currency": "USD"
+    },
+    "gpt": {
+      "input": null,
+      "output": null,
+      "cache_read": null,
+      "cache_write": null,
+      "currency": "USD"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "_comment": [
+    "状态行显示开关。省略某项等于用默认值。",
+    "cacheHit       缓存命中率（提示词 token 里由缓存供给的比例）默认 true",
+    "burnRate       燃烧速率 tok/min，只统计活跃时长，超过 300 秒的空闲间隔会被剔除，默认 true",
+    "tokenBreakdown in/out/cache_write/cache_read 四项明细，比较占地方，默认 false"
+  ],
+  "cacheHit": true,
+  "burnRate": true,
+  "tokenBreakdown": false
+}
