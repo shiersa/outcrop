@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""把 statusLine 和全部 hook 注册进每个 CLAUDE_CONFIG_DIR 的 settings.json。
+
+事件覆盖是这里最容易出错的地方，所以集中在一处定义：
+
+  UserPromptSubmit                      -> busy   你提交了输入
+  Stop                                  -> done   跑完了
+  SessionEnd                            -> idle   会话结束
+  Notification                          -> wait   权限提示 / 空闲 60 秒
+  PreToolUse(AskUserQuestion|ExitPlanMode) -> wait 选项询问 / 计划审批
+  PermissionRequest                     -> wait   权限请求
+
+最后两条是补上去的。最初只挂了 Notification，结果开着 bypass permissions 时
+计划审批完全没有信号 —— 窗口显示成绿色「已完成」，比没有状态更糟。
+
+用法:
+  register.py --binary PATH --state PATH --win PATH [--remove] [--dry-run]
+"""
+import argparse
+import json
+import os
+import shutil
+import sys
+import time
+
+EVENTS = [
+    ("UserPromptSubmit", "", "busy"),
+    ("Stop", "", "done"),
+    ("SessionEnd", "", "idle"),
+    ("Notification", "", "wait"),
+    ("PreToolUse", "AskUserQuestion|ExitPlanMode", "wait"),
+    ("PermissionRequest", "", "wait"),
+]
+
+
+def config_dirs():
+    home = os.path.expanduser("~")
+    out = []
+    for name in sorted(os.listdir(home)):
+        if name == ".claude" or name.startswith(".claude-"):
+            p = os.path.join(home, name)
+            if os.path.isdir(p):
+                out.append(p)
+    # .claude 排前面，只是为了输出好读
+    out.sort(key=lambda p: (os.path.basename(p) != ".claude", p))
+    return out
+
+
+def is_ours(cmd, scripts):
+    return any(str(cmd).startswith(s) for s in scripts)
+
+
+def apply(path, binary, scripts, remove, dry):
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f) or {}
+        except Exception as e:
+            print("   ✗ 解析失败 %s (%s)" % (path, e))
+            return False
+
+    changed = False
+
+    if remove:
+        if "statusLine" in data:
+            del data["statusLine"]
+            changed = True
+    else:
+        want = {"type": "command", "command": binary, "padding": 0}
+        if data.get("statusLine") != want:
+            data["statusLine"] = want
+            changed = True
+
+    hooks = data.get("hooks") or {}
+
+    # 先清掉本项目已有的条目，再按需重建 —— 这样事件表变了也不会留下孤儿
+    for event in list(hooks):
+        kept = []
+        for entry in hooks[event]:
+            if not isinstance(entry, dict):
+                kept.append(entry)
+                continue
+            inner = [h for h in entry.get("hooks", [])
+                     if not (isinstance(h, dict) and is_ours(h.get("command", ""), scripts))]
+            if len(inner) != len(entry.get("hooks", [])):
+                changed = True
+            if inner:
+                entry["hooks"] = inner
+                kept.append(entry)
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+
+    if not remove:
+        for event, matcher, state in EVENTS:
+            entries = hooks.setdefault(event, [])
+            for script in scripts:
+                entry = {"hooks": [{"type": "command",
+                                    "command": "%s %s" % (script, state)}]}
+                if matcher:
+                    entry["matcher"] = matcher
+                entries.append(entry)
+                changed = True
+
+    if hooks:
+        data["hooks"] = hooks
+    elif "hooks" in data:
+        del data["hooks"]
+
+    if not changed:
+        print("   - %s 已是最新" % path)
+        return True
+    if dry:
+        print("   [dry-run] %s" % path)
+        return True
+
+    if os.path.exists(path):
+        shutil.copy2(path, "%s.bak-%s" % (path, time.strftime("%Y%m%d-%H%M%S")))
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+    print("   ✓ %s" % path)
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--binary", required=True)
+    ap.add_argument("--state", required=True)
+    ap.add_argument("--win", required=True)
+    ap.add_argument("--remove", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+
+    scripts = [a.state, a.win]
+    dirs = config_dirs()
+    if not dirs:
+        print("   ✗ 没找到任何 Claude Code 配置目录")
+        sys.exit(1)
+    ok = True
+    for d in dirs:
+        ok = apply(os.path.join(d, "settings.json"), a.binary, scripts,
+                   a.remove, a.dry_run) and ok
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()

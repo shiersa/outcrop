@@ -1,66 +1,102 @@
 #!/usr/bin/env bash
 #
-# outcrop 安装器。编译源码、部署 hooks、注册 statusLine。
+# outcrop 安装器 —— 编译、部署 hook、写 tmux 配置、注册 settings.json、核查。
 # 幂等，已存在的配置不覆盖。
+#
+# 用法:
+#   ./install.sh
+#   ./install.sh --dry-run
+#   ./install.sh --ascii            图标用 ASCII（Nerd Font 显示成豆腐块时）
+#   ./install.sh --subshell         标签栏改用子进程渲染
+#   ./install.sh --no-tmux          只装 statusline
+#   ./install.sh --no-notify        wait 时不发系统通知
+#   ./install.sh --done-ttl 600     done 多久褪成 idle，0=不褪
 #
 set -uo pipefail
 
 echo "===== SCRIPT START ====="
 echo
 
-DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+DRY_RUN=0; ASCII=0; SUBSHELL=0; NO_TMUX=0; NOTIFY=1; DONE_TTL=900
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run)   DRY_RUN=1 ;;
+        --ascii)     ASCII=1 ;;
+        --subshell)  SUBSHELL=1 ;;
+        --no-tmux)   NO_TMUX=1 ;;
+        --no-notify) NOTIFY=0 ;;
+        --done-ttl)  shift; DONE_TTL="${1:-900}" ;;
+        -h|--help)   sed -n '2,18p' "$0"; echo "===== SCRIPT END ====="; exit 0 ;;
+        *)           echo "⚠️  未知参数: $1 （已忽略）" ;;
+    esac
+    shift
+done
+
+case "${DONE_TTL}" in
+    ''|*[!0-9]*) echo "✗ --done-ttl 必须是非负整数"; echo; echo "===== SCRIPT END ====="; exit 1 ;;
+esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TS="$(date +%Y%m%d-%H%M%S)"
 SL_DIR="${HOME}/.config/claude-statusline"
 HOOK_DIR="${HOME}/.config/claude-tmux"
+STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-tmux"
 BIN="${SL_DIR}/claude-statusline"
 
 run() { if [ "${DRY_RUN}" -eq 1 ]; then echo "   [dry-run] $*"; else eval "$@"; fi; }
-
-CONFIG_DIRS=()
-for d in "${HOME}"/.claude "${HOME}"/.claude-*; do
-    [ -d "${d}" ] || continue
-    case " ${CONFIG_DIRS[*]:-} " in
-        *" ${d} "*) ;;
-        *) CONFIG_DIRS+=("${d}") ;;
-    esac
-done
 
 echo "===== 1. 前置检查 ====="
 echo
 command -v go >/dev/null 2>&1 \
     && echo "✓ Go: $(go version | awk '{print $3}')" \
-    || { echo "✗ 未找到 go"; echo; echo "===== SCRIPT END ====="; exit 1; }
-[ "${#CONFIG_DIRS[@]}" -gt 0 ] \
-    && { echo "   配置目录:"; for d in "${CONFIG_DIRS[@]}"; do echo "   ✓ ${d}"; done; } \
-    || { echo "✗ 没找到 Claude Code 配置目录"; echo; echo "===== SCRIPT END ====="; exit 1; }
+    || { echo "✗ 未找到 go（macOS: brew install go）"; echo; echo "===== SCRIPT END ====="; exit 1; }
+command -v python3 >/dev/null 2>&1 \
+    && echo "✓ python3: $(python3 -V 2>&1)" \
+    || { echo "✗ 未找到 python3"; echo; echo "===== SCRIPT END ====="; exit 1; }
+if [ "${NO_TMUX}" -eq 0 ] && command -v tmux >/dev/null 2>&1; then
+    echo "✓ tmux: $(tmux -V | awk '{print $2}')"
+    [ -z "${TMUX:-}" ] && echo "   ⚠️  不在 tmux 会话内 —— 读不到现有 window-status-format，标签栏部分会跳过"
+elif [ "${NO_TMUX}" -eq 0 ]; then
+    echo "⚠️  未找到 tmux，自动跳过状态图标层"
+    NO_TMUX=1
+fi
 echo
 
 echo "===== 2. 编译 ====="
 echo
-run "mkdir -p '${SL_DIR}/cache' '${HOOK_DIR}'"
+run "mkdir -p '${SL_DIR}/cache' '${HOOK_DIR}' '${STATE_DIR}'"
 if [ "${DRY_RUN}" -eq 0 ]; then
     [ -f "${BIN}" ] && cp "${BIN}" "${BIN}.bak-${TS}"
     if ( cd "${ROOT}" && GOFLAGS=-mod=mod go build -ldflags="-s -w" -o "${BIN}" ./cmd/statusline ); then
         echo "✓ ${BIN} （$(ls -lh "${BIN}" | awk '{print $5}')，$(uname -m)）"
     else
-        echo "✗ 编译失败"; echo; echo "===== SCRIPT END ====="; exit 1
+        echo "✗ 编译失败 —— 旧二进制仍在原位，statusline 不受影响"
+        echo; echo "===== SCRIPT END ====="; exit 1
     fi
 else
     echo "   [dry-run] go build ./cmd/statusline"
 fi
 echo
 
-echo "===== 3. 部署 hooks ====="
+echo "===== 3. 部署 hook ====="
 echo
-for h in state.sh win-state.sh; do
-    [ -f "${ROOT}/hooks/${h}" ] || continue
-    run "cp '${ROOT}/hooks/${h}' '${HOOK_DIR}/${h}'"
-    run "chmod 0755 '${HOOK_DIR}/${h}'"
-    echo "✓ ${HOOK_DIR}/${h}"
-done
+if [ "${NO_TMUX}" -eq 1 ]; then
+    echo "-  跳过（--no-tmux）"
+else
+    for h in state.sh win-state.sh; do
+        [ -f "${ROOT}/hooks/${h}" ] || { echo "✗ 项目里缺 hooks/${h}"; continue; }
+        if [ "${DRY_RUN}" -eq 0 ]; then
+            # NOTIFY / DONE_TTL 是部署时注入的，项目里那份是模板
+            sed -e "s/^NOTIFY=.*/NOTIFY=${NOTIFY}/" \
+                -e "s/^DONE_TTL=.*/DONE_TTL=${DONE_TTL}/" \
+                "${ROOT}/hooks/${h}" > "${HOOK_DIR}/${h}"
+            chmod 0755 "${HOOK_DIR}/${h}"
+            bash -n "${HOOK_DIR}/${h}" || echo "   ✗ ${h} 语法错误"
+        fi
+        echo "✓ ${HOOK_DIR}/${h}"
+    done
+    echo "   通知=${NOTIFY}  done 褪色=${DONE_TTL}s"
+fi
 echo
 
 echo "===== 4. 配置模板 ====="
@@ -72,47 +108,40 @@ for c in pricing.json context_windows.json display.json glm.json; do
         run "cp '${ROOT}/config/${c}.example' '${SL_DIR}/${c}'"
         run "chmod 0600 '${SL_DIR}/${c}'"
         echo "✓ ${SL_DIR}/${c}"
+    else
+        echo "-  没有 ${c}.example，跳过（程序会用内置默认值）"
     fi
 done
 echo
 
-echo "===== 5. 注册 statusLine ====="
+echo "===== 5. 注册 settings.json ====="
 echo
-if [ "${DRY_RUN}" -eq 0 ]; then
-    for d in "${CONFIG_DIRS[@]}"; do
-        [ -f "${d}/settings.json" ] && cp "${d}/settings.json" "${d}/settings.json.bak-${TS}"
-        python3 - "${d}/settings.json" "${BIN}" <<'PYEOF' || echo "   ✗ ${d} 失败"
-import json, os, sys
-path, binary = sys.argv[1], sys.argv[2]
-data = {}
-if os.path.exists(path):
-    try:
-        data = json.load(open(path, encoding="utf-8")) or {}
-    except Exception as e:
-        print("   ✗ 解析失败 %s (%s)" % (path, e)); sys.exit(1)
-want = {"type": "command", "command": binary, "padding": 0}
-if data.get("statusLine") == want:
-    print("   - %s 已是最新" % path); sys.exit(0)
-data["statusLine"] = want
-tmp = path + ".tmp"
-with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2, ensure_ascii=False); f.write("\n")
-os.replace(tmp, path); os.chmod(path, 0o600)
-print("   ✓ %s" % path)
-PYEOF
-    done
+ARGS="--binary '${BIN}' --state '${HOOK_DIR}/state.sh' --win '${HOOK_DIR}/win-state.sh'"
+[ "${DRY_RUN}" -eq 1 ] && ARGS="${ARGS} --dry-run"
+eval "python3 '${ROOT}/scripts/register.py' ${ARGS}" || echo "   ✗ 注册失败"
+echo
+
+echo "===== 6. tmux 配置 ====="
+echo
+if [ "${NO_TMUX}" -eq 1 ]; then
+    echo "-  跳过"
 else
-    echo "   [dry-run] 会把 statusLine 指向 ${BIN}"
+    TARGS=""
+    [ "${ASCII}" -eq 1 ]    && TARGS="${TARGS} --ascii"
+    [ "${SUBSHELL}" -eq 1 ] && TARGS="${TARGS} --subshell"
+    [ "${DRY_RUN}" -eq 1 ]  && TARGS="${TARGS} --dry-run"
+    bash "${ROOT}/tmux/setup.sh" ${TARGS}
 fi
 echo
 
-echo "===== 6. 验证 ====="
+echo "===== 7. 完整性核查 ====="
 echo
-if [ "${DRY_RUN}" -eq 0 ]; then
-    OUT="$(printf '%s' '{"model":{"id":"smoke","display_name":"smoke"},"transcript_path":"/nonexistent"}' | "${BIN}" 2>&1)"
-    [ -n "${OUT}" ] && echo "✓ 冒烟测试通过" || echo "✗ 无输出"
-    echo "   完整自检: ${BIN} --verify"
+if [ "${DRY_RUN}" -eq 1 ]; then
+    echo "   [dry-run] 跳过"
+else
+    bash "${ROOT}/scripts/doctor.sh" || true
 fi
+
 echo
 echo "✓ 完成"
 echo
