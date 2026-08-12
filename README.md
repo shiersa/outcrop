@@ -41,6 +41,32 @@
 
     ./uninstall.sh
 
+## 在别的 Mac 上安装（免 Go）
+
+目标机器不需要 Go，也不需要这个仓库。
+
+1. 在有仓库的机器上打包（交叉编译 universal 二进制）：
+
+       ./scripts/release.sh
+
+   产出 `dist/outcrop-<版本>-darwin-universal.tar.gz` 和 `.sha256`。
+   版本号取自 `git describe --tags --always --dirty`，注入进了二进制，
+   `claude-statusline --version` 可查 —— 多台机器装不同版本时靠它分清。
+
+2. 传到目标机器，校验后解压：
+
+       shasum -a 256 -c outcrop-<版本>-darwin-universal.tar.gz.sha256
+       tar xzf outcrop-<版本>-darwin-universal.tar.gz
+
+3. 进目录装：
+
+       cd outcrop && ./install.sh
+
+`install.sh` 一份两用：包根目录有可执行的 `claude-statusline` 就走预编译
+（直接 cp，无需 Go），没有就现场编译。预编译路径会 `xattr -dr
+com.apple.quarantine` 去掉隔离属性 —— 二进制没有代码签名，从网络传过去 macOS
+会隔离它，运行时报"无法验证开发者"。包里只含二进制和脚本，没有 `.go` / `go.mod`。
+
 ## 目录
 
     cmd/statusline/   Go 源码，只用标准库

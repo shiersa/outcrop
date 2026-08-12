@@ -43,13 +43,22 @@ HOOK_DIR="${HOME}/.config/claude-tmux"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-tmux"
 BIN="${SL_DIR}/claude-statusline"
 
+# 两用：包根目录有可执行的 claude-statusline 就是发布包（直接 cp），否则现场编译。
+PREBUILT=0
+[ -x "${ROOT}/claude-statusline" ] && PREBUILT=1
+
 run() { if [ "${DRY_RUN}" -eq 1 ]; then echo "   [dry-run] $*"; else eval "$@"; fi; }
 
 echo "===== 1. 前置检查 ====="
 echo
-command -v go >/dev/null 2>&1 \
-    && echo "✓ Go: $(go version | awk '{print $3}')" \
-    || { echo "✗ 未找到 go（macOS: brew install go）"; echo; echo "===== SCRIPT END ====="; exit 1; }
+# Go 只在需要现场编译时才是硬依赖；发布包带了预编译二进制就不需要。
+if [ "${PREBUILT}" -eq 1 ]; then
+    echo "✓ 使用预编译二进制（发布包），无需 Go"
+else
+    command -v go >/dev/null 2>&1 \
+        && echo "✓ Go: $(go version | awk '{print $3}')" \
+        || { echo "✗ 未找到 go（macOS: brew install go）"; echo; echo "===== SCRIPT END ====="; exit 1; }
+fi
 command -v python3 >/dev/null 2>&1 \
     && echo "✓ python3: $(python3 -V 2>&1)" \
     || { echo "✗ 未找到 python3"; echo; echo "===== SCRIPT END ====="; exit 1; }
@@ -62,10 +71,27 @@ elif [ "${NO_TMUX}" -eq 0 ]; then
 fi
 echo
 
-echo "===== 2. 编译 ====="
+if [ "${PREBUILT}" -eq 1 ]; then
+    echo "===== 2. 部署二进制（预编译）====="
+else
+    echo "===== 2. 编译 ====="
+fi
 echo
 run "mkdir -p '${SL_DIR}/cache' '${HOOK_DIR}' '${STATE_DIR}'"
-if [ "${DRY_RUN}" -eq 0 ]; then
+if [ "${PREBUILT}" -eq 1 ]; then
+    if [ "${DRY_RUN}" -eq 0 ]; then
+        [ -f "${BIN}" ] && cp "${BIN}" "${BIN}.bak-${TS}"
+        cp "${ROOT}/claude-statusline" "${BIN}"
+        chmod 0755 "${BIN}"
+        # 没有代码签名，从网络传过去的二进制会被 macOS 隔离，
+        # 运行时报"无法验证开发者"——cp 之后去掉隔离属性。
+        xattr -dr com.apple.quarantine "${BIN}" 2>/dev/null || true
+        ARCH="$(file "${BIN}" | grep -oE 'universal|arm64|x86_64' | head -1)"
+        echo "✓ ${BIN} （$(ls -lh "${BIN}" | awk '{print $5}')，预编译 ${ARCH}）"
+    else
+        echo "   [dry-run] cp 预编译二进制 -> ${BIN}"
+    fi
+elif [ "${DRY_RUN}" -eq 0 ]; then
     [ -f "${BIN}" ] && cp "${BIN}" "${BIN}.bak-${TS}"
     if ( cd "${ROOT}" && GOFLAGS=-mod=mod go build -ldflags="-s -w" -o "${BIN}" ./cmd/statusline ); then
         echo "✓ ${BIN} （$(ls -lh "${BIN}" | awk '{print $5}')，$(uname -m)）"

@@ -2,6 +2,7 @@
 /bin/
 claude-statusline
 /statusline
+/dist/
 *.bak-*
 *.prepatch*
 

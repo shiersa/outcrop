@@ -53,6 +53,10 @@ const (
 	litellmURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 )
 
+// buildVersion 由 scripts/release.sh 用 -ldflags "-X main.buildVersion=<版本>" 注入；
+// 现场编译时保持 "dev"。多台机器装了不同版本时，--version 是唯一快速分清的办法。
+var buildVersion = "dev"
+
 // 智谱国内站(open.bigmodel.cn)与海外站(api.z.ai)是两套域名，端点路径、鉴权方式、
 // 响应字段都可能不同，且没有公开确认过。所以不硬编码 —— 用 --probe-glm 探测出真实
 // 情况后写进 glm.json，按 base_url 自动选对应站点，改配置即生效，不用重新编译。
@@ -2245,7 +2249,7 @@ func main() {
 			glmQuotaRefresh()
 			return
 		case "--version":
-			fmt.Println("claude-statusline (go)")
+			fmt.Printf("claude-statusline %s\n", buildVersion)
 			return
 		}
 	}
