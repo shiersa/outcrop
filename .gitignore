@@ -1,6 +1,7 @@
 # 编译产物
 /bin/
 claude-statusline
+/statusline
 *.bak-*
 *.prepatch*
 

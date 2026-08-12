@@ -6,7 +6,10 @@
     "  OpenAI    https://openai.com/api/pricing",
     "cache_read 通常远低于 input（DeepSeek 上大约是一折），务必单独填，",
     "留 null 会回退到按 input 价计算，成本会系统性偏高。",
-    "correction_factor 由 --calibrate 指导你填，填了之后金额去掉 ~ 和 * 标记。"
+    "correction_factor 由 --calibrate 指导你填，填了之后金额去掉 ~ 和 * 标记。",
+    "--sync-pricing 从 LiteLLM 拉取单价（每 token 换算成每 1M）：手填条目（无 source 标记）不会被覆盖；",
+    "同步写入的条目带 \"source\": \"litellm@<日期>\"，下次会被刷新——想锁定某条就别加这个标记。",
+    "模型名对不上上游时，可在条目里加 \"upstream\": \"provider/model\" 显式指定。"
   ],
   "correction_factor": {},
   "models": {

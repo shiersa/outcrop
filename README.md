@@ -74,6 +74,7 @@
     claude-statusline --dump-input   列出 statusline 收到的全部字段
     claude-statusline --probe-glm    探测智谱额度接口的端点/鉴权/字段名
     claude-statusline --calibrate    DeepSeek 余额差分校准
+    claude-statusline --sync-pricing 从 LiteLLM 价目表同步单价（手填条目不覆盖）
 
 ## 设计上值得记住的几件事
 

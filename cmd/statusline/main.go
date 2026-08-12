@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -41,11 +42,16 @@ var (
 	glmCfgPath  = filepath.Join(baseDir, "glm.json")
 	lastInput   = filepath.Join(cacheDir, "last-input.json")
 	glmCache    = filepath.Join(cacheDir, "glm_quota.json")
+	litellmCache = filepath.Join(cacheDir, "litellm-prices.json")
 )
 
 const (
 	quotaTTL   = 5 * time.Minute
 	netTimeout = 4 * time.Second
+
+	// LiteLLM 社区维护的标准价目表（MIT），按每 token 计价。
+	// 我们的 pricing.json 用每 1M token，拉取后 ×1e6 换算。
+	litellmURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 )
 
 // 智谱国内站与海外站(z.ai)是两套域名，端点路径和鉴权方式都可能不同，
@@ -1644,6 +1650,370 @@ func parseF(s string) float64 {
 }
 
 // ---------------------------------------------------------------------------
+// --sync-pricing：从 LiteLLM 价目表同步单价进 pricing.json
+// ---------------------------------------------------------------------------
+
+// fetchLitellm 返回 (上游顶层 map, 数据日期, 来源标注, error)。
+// 来源标注："live" = 这次联网拉到的；"cache" = 联网失败回退或 --offline 命中的缓存。
+// 数据日期对 live 是今天，对 cache 是缓存写入那天的日期——绝不拿旧数据冒充新的。
+func fetchLitellm(offline bool) (map[string]json.RawMessage, string, string, error) {
+	var cached litellmCacheBlob
+	hasCache := loadJSON(litellmCache, &cached) == nil && len(cached.Data) > 0
+
+	if offline {
+		if !hasCache {
+			return nil, "", "", fmt.Errorf("--offline 但没有缓存（%s），先联网跑一次", litellmCache)
+		}
+		return decodeRawMap(cached.Data), cached.Fetched, "cache", nil
+	}
+
+	// 联网失败时只要本地有缓存就回退，并如实标成 cache。
+	fallback := func() (map[string]json.RawMessage, string, string, error) {
+		if hasCache {
+			return decodeRawMap(cached.Data), cached.Fetched, "cache", nil
+		}
+		return nil, "", "", fmt.Errorf("拉取失败且无缓存")
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("GET", litellmURL, nil)
+	if err != nil {
+		return fallback()
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return fallback()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fallback()
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return fallback()
+	}
+	if decodeRawMap(body) == nil {
+		return fallback() // 不是合法 JSON 对象
+	}
+	today := time.Now().Format("2006-01-02")
+	_ = saveJSON(litellmCache, litellmCacheBlob{TS: time.Now().Unix(), Fetched: today, Data: body})
+	return decodeRawMap(body), today, "live", nil
+}
+
+type litellmCacheBlob struct {
+	TS      int64           `json:"ts"`
+	Fetched string          `json:"fetched"` // YYYY-MM-DD
+	Data    json.RawMessage `json:"data"`
+}
+
+func decodeRawMap(raw json.RawMessage) map[string]json.RawMessage {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+// numField 从一个 raw 条目里取数值字段，容忍 float / int / 数字字符串。
+// 社区文件里同一字段在不同条目类型不一致（实测 max_input_tokens 就有字符串），
+// 任何解析失败都静默返回 false —— 单条目格式怪异不能搞挂整次同步。
+func numField(entry map[string]json.RawMessage, key string) (float64, bool) {
+	raw, ok := entry[key]
+	if !ok || len(raw) == 0 {
+		return 0, false
+	}
+	var v interface{}
+	if json.Unmarshal(raw, &v) != nil {
+		return 0, false
+	}
+	return toFloat(v)
+}
+
+// litellmPrice 是换算前（仍按每 token）从上游条目取出的四个单价，缺的为 nil。
+type litellmPrice struct {
+	input, output         *float64
+	cacheRead, cacheWrite *float64
+}
+
+// extractPrices 取四个成本字段。input 缺失时返回的 input 为 nil，
+// 调用方据此判定「这个上游条目不构成可填的价格」（如 sample_spec 那类文档条目）。
+func extractPrices(up map[string]json.RawMessage) litellmPrice {
+	var p litellmPrice
+	if v, ok := numField(up, "input_cost_per_token"); ok {
+		p.input = &v
+	}
+	if v, ok := numField(up, "output_cost_per_token"); ok {
+		p.output = &v
+	}
+	if v, ok := numField(up, "cache_read_input_token_cost"); ok {
+		p.cacheRead = &v
+	}
+	if v, ok := numField(up, "cache_creation_input_token_cost"); ok {
+		p.cacheWrite = &v
+	}
+	return p
+}
+
+// matchUpstream 把我们的 key（常是裸名）映射到上游的 key（常是 provider/model）。
+// 顺序：条目显式 upstream → 精确 → 后缀 /key 取最短 key（避开 *-batch/*-priority 等变体）。
+func matchUpstream(ourKey string, entry, upstream map[string]json.RawMessage) (string, bool) {
+	if ur, ok := entry["upstream"]; ok {
+		var s string
+		if json.Unmarshal(ur, &s) == nil && s != "" {
+			if _, ok := upstream[s]; ok {
+				return s, true
+			}
+		}
+	}
+	if _, ok := upstream[ourKey]; ok {
+		return ourKey, true
+	}
+	suffix := "/" + ourKey
+	best := ""
+	for k := range upstream {
+		if strings.HasSuffix(k, suffix) && (best == "" || len(k) < len(best)) {
+			best = k
+		}
+	}
+	if best != "" {
+		return best, true
+	}
+	return "", false
+}
+
+// applyPrice 把换算后的价格写进条目，保留条目里的未知字段与 upstream。
+// 写入的 source 标记让下次同步能认出这是托管条目、可以刷新。
+func applyPrice(entry map[string]json.RawMessage, p litellmPrice, date string) map[string]json.RawMessage {
+	out := make(map[string]json.RawMessage, len(entry)+5)
+	for k, v := range entry {
+		out[k] = v
+	}
+	setNum := func(k string, f *float64) {
+		if f != nil {
+			b, _ := json.Marshal(roundPrice(*f * 1e6))
+			out[k] = b
+		} else {
+			out[k] = json.RawMessage("null")
+		}
+	}
+	setNum("input", p.input)
+	setNum("output", p.output)
+	setNum("cache_read", p.cacheRead)
+	setNum("cache_write", p.cacheWrite)
+	if _, ok := out["currency"]; !ok {
+		out["currency"] = json.RawMessage(`"USD"`)
+	}
+	sb, _ := json.Marshal("litellm@" + date)
+	out["source"] = sb
+	return out
+}
+
+func roundPrice(v float64) float64 {
+	return math.Round(v*1e6) / 1e6
+}
+
+// isLitellmManaged：source 以 litellm@ 开头，即由本命令写入、可刷新的托管条目。
+func isLitellmManaged(entry map[string]json.RawMessage) bool {
+	var s string
+	if r, ok := entry["source"]; ok {
+		_ = json.Unmarshal(r, &s)
+	}
+	return strings.HasPrefix(s, "litellm@")
+}
+
+// fieldNonNull：字段存在且不是 JSON null。用来判定「手填过价格」。
+func fieldNonNull(entry map[string]json.RawMessage, key string) bool {
+	r, ok := entry[key]
+	if !ok {
+		return false
+	}
+	t := strings.TrimSpace(string(r))
+	return t != "" && t != "null"
+}
+
+func hasManualPrice(entry map[string]json.RawMessage) bool {
+	return fieldNonNull(entry, "input") || fieldNonNull(entry, "output")
+}
+
+func backupPricing() (string, error) {
+	src, err := os.ReadFile(pricingPath)
+	if err != nil {
+		return "", err
+	}
+	dst := pricingPath + ".bak-" + time.Now().Format("20060102-150405")
+	return dst, os.WriteFile(dst, src, 0o600)
+}
+
+func cmdSyncPricing(args []string) {
+	var dryRun, offline, force bool
+	var adds []string
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--dry-run":
+			dryRun = true
+		case a == "--offline":
+			offline = true
+		case a == "--force":
+			force = true
+		case a == "--add":
+			if i+1 >= len(args) {
+				fmt.Println("✗ --add 需要一个模型名参数")
+				return
+			}
+			i++
+			adds = append(adds, args[i])
+		case a == "-h", a == "--help":
+			fmt.Println("用法: claude-statusline --sync-pricing [--dry-run] [--offline] [--force] [--add <model>]")
+			return
+		default:
+			fmt.Printf("✗ 未知参数: %s（--help 看用法）\n", a)
+			return
+		}
+	}
+
+	// 顶层用 map[string]json.RawMessage 读，_comment / correction_factor 原样保留。
+	rawTop, readErr := os.ReadFile(pricingPath)
+	if readErr != nil {
+		rawTop = []byte(`{}`)
+		fmt.Printf("⚠️  %s 不存在，从空骨架开始\n", pricingPath)
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal(rawTop, &top) != nil || top == nil {
+		fmt.Printf("✗ %s 不是合法 JSON\n", pricingPath)
+		return
+	}
+	models := decodeRawMap(top["models"])
+
+	// --add：先塞空占位条目，后面统一走同步匹配。
+	addSet := map[string]bool{}
+	for _, m := range adds {
+		m = strings.TrimSpace(m)
+		if m == "" || addSet[m] {
+			continue
+		}
+		addSet[m] = true
+		if _, exists := models[m]; !exists {
+			ph, _ := json.Marshal(modelPrice{Currency: "USD"})
+			models[m] = ph
+		}
+	}
+
+	upstream, date, source, err := fetchLitellm(offline)
+	if err != nil {
+		fmt.Printf("✗ %v\n", err)
+		return
+	}
+	srcLabel := "实时拉取（" + date + "）"
+	if source == "cache" {
+		srcLabel = "缓存（" + date + "），联网失败已回退 —— 不是最新数据"
+	}
+
+	var updated, skippedManual, skippedNoMatch []string
+	addOutcome := map[string]string{}
+	newModels := make(map[string]json.RawMessage, len(models))
+
+	keys := make([]string, 0, len(models))
+	for k := range models {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		entry := decodeRawMap(models[k])
+		managed := isLitellmManaged(entry)
+		manual := !managed && hasManualPrice(entry)
+		// 托管→刷新；空占位→填；手填→仅 --force 覆盖
+		shouldFill := managed || force || !manual
+
+		if !shouldFill {
+			newModels[k] = models[k]
+			skippedManual = append(skippedManual, k)
+			continue
+		}
+		upKey, ok := matchUpstream(k, entry, upstream)
+		if !ok {
+			newModels[k] = models[k]
+			skippedNoMatch = append(skippedNoMatch, k)
+			if addSet[k] {
+				addOutcome[k] = "无匹配，留空占位（手填或加 \"upstream\"）"
+			}
+			continue
+		}
+		p := extractPrices(decodeRawMap(upstream[upKey]))
+		if p.input == nil || p.output == nil {
+			newModels[k] = models[k]
+			skippedNoMatch = append(skippedNoMatch, k)
+			continue
+		}
+		newModels[k], _ = json.Marshal(applyPrice(entry, p, date))
+		updated = append(updated, k+"  <-  "+upKey)
+		if addSet[k] {
+			addOutcome[k] = "已填入 <- " + upKey
+		}
+	}
+
+	fmt.Println("===== 同步定价 =====")
+	fmt.Printf("数据来源: %s\n\n", srcLabel)
+
+	printList("已更新", updated)
+	printList("跳过（手填，--force 才覆盖）", skippedManual)
+	printList("跳过（上游无匹配）", skippedNoMatch)
+	if len(addSet) > 0 {
+		fmt.Println("新增条目:")
+		for _, m := range adds {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			fmt.Printf("   %s: %s\n", m, orEmpty2(addOutcome[m], "已在文件中，跳过"))
+		}
+	}
+
+	changed := len(updated) > 0 || len(addSet) > 0
+	switch {
+	case dryRun:
+		fmt.Println("\n（--dry-run，未写入）")
+	case !changed:
+		fmt.Println("\n无变更，未写入。")
+	default:
+		bak, berr := backupPricing()
+		if berr != nil {
+			fmt.Printf("\n✗ 备份失败: %v（已中止，未写入）\n", berr)
+			return
+		}
+		fmt.Printf("\n已备份: %s\n", bak)
+		top["models"], _ = json.Marshal(newModels)
+		if err := saveJSON(pricingPath, top); err != nil {
+			fmt.Printf("✗ 写入失败: %v\n", err)
+			return
+		}
+		fmt.Println("已写入:", pricingPath)
+	}
+
+	fmt.Println()
+	fmt.Println("提醒：上游是标准价目表，不含限时活动与错峰折扣；")
+	fmt.Println("      实际扣费有偏差时用 --calibrate 算出 correction_factor 校正。")
+}
+
+func printList(title string, items []string) {
+	if len(items) == 0 {
+		return
+	}
+	fmt.Println(title + ":")
+	for _, s := range items {
+		fmt.Println("   " + s)
+	}
+}
+
+func orEmpty2(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -1664,6 +2034,9 @@ func main() {
 			return
 		case "--calibrate":
 			cmdCalibrate()
+			return
+		case "--sync-pricing":
+			cmdSyncPricing(os.Args[2:])
 			return
 		case "--probe-glm":
 			cmdProbeGLM()
