@@ -41,7 +41,6 @@ var (
 	displayPath = filepath.Join(baseDir, "display.json")
 	glmCfgPath  = filepath.Join(baseDir, "glm.json")
 	lastInput   = filepath.Join(cacheDir, "last-input.json")
-	glmCache    = filepath.Join(cacheDir, "glm_quota.json")
 	litellmCache = filepath.Join(cacheDir, "litellm-prices.json")
 )
 
@@ -54,43 +53,181 @@ const (
 	litellmURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 )
 
-// 智谱国内站与海外站(z.ai)是两套域名，端点路径和鉴权方式都可能不同，
-// 而且响应结构没有公开确认。所以不硬编码 —— 用 --probe-glm 探测出
-// 真实情况后写进 glm.json，改配置即可生效，不用重新编译。
-var glmDefaultEndpoints = []string{
-	"https://open.bigmodel.cn/api/monitor/usage/quota/limit",
-	"https://api.z.ai/api/monitor/usage/quota/limit",
+// 智谱国内站(open.bigmodel.cn)与海外站(api.z.ai)是两套域名，端点路径、鉴权方式、
+// 响应字段都可能不同，且没有公开确认过。所以不硬编码 —— 用 --probe-glm 探测出真实
+// 情况后写进 glm.json，按 base_url 自动选对应站点，改配置即生效，不用重新编译。
+//
+// 注意：z.ai 的额度端点路径没有官方来源，是按国内站类推猜的，鉴权方式也未知，
+// 所以 --probe-glm 会同时试 raw 和 bearer 两种鉴权。
+var glmDefaultEndpoints = map[string]glmEndpoint{
+	"bigmodel.cn": {URL: "https://open.bigmodel.cn/api/monitor/usage/quota/limit", AuthScheme: "raw"},
+	"z.ai":        {URL: "https://api.z.ai/api/monitor/usage/quota/limit", AuthScheme: "raw"},
 }
 
-type glmConfig struct {
-	Endpoint   string              `json:"endpoint"`
+// glmDefaultFields 是字段命名的兜底候选；每个站点可在 glm.json 里覆盖。
+var glmDefaultFields = map[string][]string{
+	"used_pct": {"used_pct", "usedPercent", "percent", "usage_rate"},
+	"used":     {"used", "used_tokens", "usedTokens"},
+	"total":    {"total", "limit", "quota", "total_tokens"},
+	"mcp_pct":  {"mcp_used_pct", "mcpPercent", "mcp_usage"},
+}
+
+type glmEndpoint struct {
+	URL        string              `json:"url"`
 	AuthScheme string              `json:"auth_scheme"` // raw | bearer
 	Fields     map[string][]string `json:"fields"`
 }
 
-func loadGLMConfig() glmConfig {
-	var c glmConfig
-	_ = loadJSON(glmCfgPath, &c)
-	if c.Endpoint == "" {
-		c.Endpoint = glmDefaultEndpoints[0]
+type glmConfig struct {
+	Endpoints map[string]glmEndpoint `json:"endpoints"`
+}
+
+// normalized 补默认：auth 空 → raw，fields 缺项 → glmDefaultFields。
+func (e glmEndpoint) normalized() glmEndpoint {
+	if e.AuthScheme == "" {
+		e.AuthScheme = "raw"
 	}
-	if c.AuthScheme == "" {
-		c.AuthScheme = "raw"
+	if e.Fields == nil {
+		e.Fields = map[string][]string{}
 	}
-	if c.Fields == nil {
-		c.Fields = map[string][]string{}
-	}
-	for k, v := range map[string][]string{
-		"used_pct": {"used_pct", "usedPercent", "percent", "usage_rate"},
-		"used":     {"used", "used_tokens", "usedTokens"},
-		"total":    {"total", "limit", "quota", "total_tokens"},
-		"mcp_pct":  {"mcp_used_pct", "mcpPercent", "mcp_usage"},
-	} {
-		if _, ok := c.Fields[k]; !ok {
-			c.Fields[k] = v
+	for k, v := range glmDefaultFields {
+		if _, ok := e.Fields[k]; !ok {
+			e.Fields[k] = v
 		}
 	}
-	return c
+	return e
+}
+
+// loadGLMConfig 读 glm.json。新结构是 endpoints 映射；旧的单 endpoint 结构自动迁移。
+// 迁移静默进行 —— 本函数在每次渲染都被调，stdout 就是状态栏，不能往里打印；
+// 原文件备份成 .bak-<时间戳>，_comment 等顶层键保留。
+func loadGLMConfig() glmConfig {
+	raw, err := os.ReadFile(glmCfgPath)
+	if err != nil {
+		return glmConfig{} // 无配置文件，调用方走内置默认
+	}
+	var probe struct {
+		Endpoints json.RawMessage `json:"endpoints"`
+		Endpoint  string          `json:"endpoint"`
+	}
+	if json.Unmarshal(raw, &probe) != nil {
+		return glmConfig{}
+	}
+	if len(probe.Endpoints) > 0 && strings.TrimSpace(string(probe.Endpoints)) != "null" {
+		var c glmConfig
+		if json.Unmarshal(raw, &c) == nil {
+			return c
+		}
+	}
+	if probe.Endpoint != "" {
+		return migrateLegacyGLM(raw)
+	}
+	return glmConfig{}
+}
+
+// migrateLegacyGLM 把旧的单 endpoint 结构升级成 endpoints 映射：旧 endpoint 按 URL
+// 域名片段归位（保留用户实测的 fields），另一个内置站点补默认；保留 _comment 等顶层键。
+func migrateLegacyGLM(raw []byte) glmConfig {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(raw, &top) != nil {
+		top = map[string]json.RawMessage{}
+	}
+	var leg struct {
+		Endpoint   string              `json:"endpoint"`
+		AuthScheme string              `json:"auth_scheme"`
+		Fields     map[string][]string `json:"fields"`
+	}
+	_ = json.Unmarshal(raw, &leg)
+
+	siteKey := defaultSiteKeyForURL(leg.Endpoint)
+	if leg.AuthScheme == "" {
+		leg.AuthScheme = "raw"
+	}
+	eps := map[string]glmEndpoint{
+		siteKey: {URL: leg.Endpoint, AuthScheme: leg.AuthScheme, Fields: leg.Fields},
+	}
+	for k, v := range glmDefaultEndpoints {
+		if _, ok := eps[k]; !ok {
+			eps[k] = v
+		}
+	}
+
+	delete(top, "endpoint")
+	delete(top, "auth_scheme")
+	delete(top, "fields")
+	epBytes, _ := json.MarshalIndent(eps, "", "  ")
+	top["endpoints"] = epBytes
+	if _, err := backupFile(glmCfgPath); err == nil {
+		_ = saveJSON(glmCfgPath, top)
+	}
+	return glmConfig{Endpoints: eps}
+}
+
+// defaultSiteKeyForURL 按 URL 里的域名片段推断归属哪个内置站点（最长命中）；都不含则归国内站。
+func defaultSiteKeyForURL(u string) string {
+	l := strings.ToLower(u)
+	var bestKey string
+	bestLen := 0
+	for k := range glmDefaultEndpoints {
+		kk := strings.ToLower(k)
+		if strings.Contains(l, kk) && len(kk) > bestLen {
+			bestKey, bestLen = k, len(kk)
+		}
+	}
+	if bestKey != "" {
+		return bestKey
+	}
+	return "bigmodel.cn"
+}
+
+// resolveGLMSite 按当前 base_url 选站点：先匹配置里的 endpoints key（最长命中），
+// 再退到内置默认。返回 (站点key, 已 normalized 的端点, 是否命中)。
+func resolveGLMSite(cfg glmConfig, base string) (string, glmEndpoint, bool) {
+	base = strings.ToLower(base)
+	if k, ep, ok := matchGLMSite(base, cfg.Endpoints); ok {
+		return k, ep.normalized(), true
+	}
+	if k, ep, ok := matchGLMSite(base, glmDefaultEndpoints); ok {
+		return k, ep.normalized(), true
+	}
+	return "", glmEndpoint{}, false
+}
+
+// matchGLMSite 在 base 里找命中的 key，多个命中取最长；排序保证输出稳定。
+func matchGLMSite(base string, m map[string]glmEndpoint) (string, glmEndpoint, bool) {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var bestKey string
+	bestLen := 0
+	for _, k := range keys {
+		kk := strings.ToLower(k)
+		if strings.Contains(base, kk) && len(kk) > bestLen {
+			bestKey, bestLen = k, len(kk)
+		}
+	}
+	if bestKey != "" {
+		return bestKey, m[bestKey], true
+	}
+	return "", glmEndpoint{}, false
+}
+
+// glmCachePath 返回按站点分文件的额度缓存路径，避免两套 GLM 共用一个缓存、
+// 切 profile 时看到上一个账号的额度。
+func glmCachePath(siteKey string) string {
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			return r
+		}
+		return '_'
+	}, siteKey)
+	if safe == "" {
+		safe = "default"
+	}
+	return filepath.Join(cacheDir, "glm_quota-"+safe+".json")
 }
 
 func glmAuthHeader(scheme, token string) (string, string) {
@@ -675,11 +812,12 @@ type quotaBlob struct {
 	Error string          `json:"error,omitempty"`
 }
 
-func glmQuotaCached() (map[string]interface{}, time.Duration) {
+func glmQuotaCached(siteKey string) (map[string]interface{}, time.Duration) {
 	var blob quotaBlob
-	_ = loadJSON(glmCache, &blob)
+	_ = loadJSON(glmCachePath(siteKey), &blob)
 	age := time.Since(time.Unix(blob.TS, 0))
 	if age > quotaTTL {
+		// 子进程继承 env，自己按 ANTHROPIC_BASE_URL 解析站点，无需传参。
 		if exe, err := os.Executable(); err == nil {
 			cmd := exec.Command(exe, "--refresh-quota")
 			cmd.Stdout, cmd.Stderr, cmd.Stdin = nil, nil, nil
@@ -706,17 +844,22 @@ func glmQuotaRefresh() {
 		return
 	}
 	cfg := loadGLMConfig()
-	req, err := http.NewRequest("GET", cfg.Endpoint, nil)
+	siteKey, ep, ok := resolveGLMSite(cfg, os.Getenv("ANTHROPIC_BASE_URL"))
+	if !ok || ep.URL == "" {
+		return
+	}
+	path := glmCachePath(siteKey)
+	req, err := http.NewRequest("GET", ep.URL, nil)
 	if err != nil {
 		return
 	}
-	hk, hv := glmAuthHeader(cfg.AuthScheme, token)
+	hk, hv := glmAuthHeader(ep.AuthScheme, token)
 	req.Header.Set(hk, hv)
 	req.Header.Set("Accept", "application/json")
 	client := &http.Client{Timeout: netTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		_ = saveJSON(glmCache, quotaBlob{TS: time.Now().Unix(), Error: err.Error()})
+		_ = saveJSON(path, quotaBlob{TS: time.Now().Unix(), Error: err.Error()})
 		return
 	}
 	defer resp.Body.Close()
@@ -724,7 +867,7 @@ func glmQuotaRefresh() {
 	if err != nil {
 		return
 	}
-	_ = saveJSON(glmCache, quotaBlob{TS: time.Now().Unix(), Data: body})
+	_ = saveJSON(path, quotaBlob{TS: time.Now().Unix(), Data: body})
 }
 
 // dig 在嵌套结构里找第一个匹配的 key。
@@ -1022,27 +1165,31 @@ var widgets = map[string]func(widgetCtx) string{
 var defaultLine = []string{"model", "quota", "tokens", "cost", "cache", "burn", "ctx"}
 
 func renderGLMQuota() string {
-	q, age := glmQuotaCached()
+	cfg := loadGLMConfig()
+	siteKey, ep, ok := resolveGLMSite(cfg, os.Getenv("ANTHROPIC_BASE_URL"))
+	if !ok {
+		return cGray + "quota n/a" + cReset
+	}
+	q, age := glmQuotaCached(siteKey)
 	if q == nil {
 		return cGray + "quota …" + cReset
 	}
-	gc := loadGLMConfig()
 	var segs []string
-	p, ok := dig(q, gc.Fields["used_pct"]...)
-	if !ok {
-		used, ok1 := dig(q, gc.Fields["used"]...)
-		total, ok2 := dig(q, gc.Fields["total"]...)
+	p, pok := dig(q, ep.Fields["used_pct"]...)
+	if !pok {
+		used, ok1 := dig(q, ep.Fields["used"]...)
+		total, ok2 := dig(q, ep.Fields["total"]...)
 		if ok1 && ok2 && total > 0 {
-			p, ok = used/total*100, true
+			p, pok = used/total*100, true
 		}
 	}
-	if ok {
+	if pok {
 		p = normPct(p)
 		segs = append(segs, fmt.Sprintf("%s5h %s %.0f%%%s", pctColor(p), bar(p, 5), p, cReset))
 	} else {
 		segs = append(segs, cRed+"字段未匹配"+cReset)
 	}
-	if p, ok := dig(q, gc.Fields["mcp_pct"]...); ok {
+	if p, ok := dig(q, ep.Fields["mcp_pct"]...); ok {
 		p = normPct(p)
 		segs = append(segs, fmt.Sprintf("%sMCP %.0f%%%s", pctColor(p), p, cReset))
 	}
@@ -1242,15 +1389,16 @@ func cmdVerify() {
 	fmt.Println("4. 智谱额度接口")
 	if provider == "glm" {
 		glmQuotaRefresh()
+		siteKey, _, ok := resolveGLMSite(loadGLMConfig(), os.Getenv("ANTHROPIC_BASE_URL"))
 		var blob quotaBlob
-		if loadJSON(glmCache, &blob) == nil && len(blob.Data) > 0 {
+		if ok && loadJSON(glmCachePath(siteKey), &blob) == nil && len(blob.Data) > 0 {
 			fmt.Println("   ✓ 原始响应（字段名以此为准，必要时回来改 dig() 的取值）:")
 			fmt.Println(truncate(prettyJSON(blob.Data), 1500))
 		} else {
 			fmt.Printf("   ✗ 请求失败或没有 ANTHROPIC_AUTH_TOKEN: %s\n", blob.Error)
 		}
 	} else {
-		fmt.Println("   -  当前不在 GLM profile 下，跳过。切到 cc-glm 再跑一次。")
+		fmt.Println("   -  当前不在 GLM profile 下，跳过。切到 cc-glm / cc-ally-glm 再跑一次。")
 	}
 	fmt.Println()
 
@@ -1425,26 +1573,41 @@ func cmdProbeGLM() {
 	}
 	fmt.Printf("   token 前缀 %s…（长度 %d）\n", safePrefix(token), len(token))
 	base := os.Getenv("ANTHROPIC_BASE_URL")
-	fmt.Printf("   ANTHROPIC_BASE_URL = %s\n\n", orEmpty(base))
+	fmt.Printf("   ANTHROPIC_BASE_URL = %s\n", orEmpty(base))
 
 	cfg := loadGLMConfig()
-	endpoints := []string{}
-	if cfg.Endpoint != "" {
-		endpoints = append(endpoints, cfg.Endpoint)
+	siteKey, curEP, resolved := resolveGLMSite(cfg, base)
+	if resolved {
+		fmt.Printf("   解析站点: %s\n", siteKey)
+		fmt.Printf("   将要尝试: %s（当前 auth=%s）\n", curEP.URL, curEP.AuthScheme)
+	} else {
+		fmt.Println("   ⚠️  当前 base_url 没匹配到任何配置站点，将只试内置默认端点")
 	}
-	for _, e := range glmDefaultEndpoints {
-		if !contains(endpoints, e) {
-			endpoints = append(endpoints, e)
+	fmt.Println()
+
+	// 候选端点 = 当前站点 URL + 内置默认，去重后排序（输出顺序稳定）
+	seen := map[string]bool{}
+	var candidates []string
+	add := func(u string) {
+		if u != "" && !seen[u] {
+			seen[u] = true
+			candidates = append(candidates, u)
 		}
 	}
+	if resolved {
+		add(curEP.URL)
+	}
+	for _, e := range glmDefaultEndpoints {
+		add(e.URL)
+	}
+	sort.Strings(candidates)
 
 	type result struct {
 		ep, scheme, body string
 		code             int
 	}
 	var wins []result
-
-	for _, ep := range endpoints {
+	for _, ep := range candidates {
 		for _, scheme := range []string{"raw", "bearer"} {
 			code, body, err := glmTry(ep, scheme, token)
 			label := fmt.Sprintf("%s  [%s]", ep, scheme)
@@ -1466,7 +1629,7 @@ func cmdProbeGLM() {
 		fmt.Println("✗ 没有可用的组合。")
 		fmt.Println("   可能是端点路径变了，或者你的套餐没有开放这个接口。")
 		fmt.Println("   去 docs.bigmodel.cn/cn/coding-plan 查最新端点，")
-		fmt.Printf("   然后写进 %s 的 endpoint 字段。\n", glmCfgPath)
+		fmt.Printf("   然后写进 %s 对应站点的 url 字段。\n", glmCfgPath)
 		return
 	}
 
@@ -1475,35 +1638,65 @@ func cmdProbeGLM() {
 	fmt.Println(truncate(prettyJSON(json.RawMessage(w.body)), 2000))
 	fmt.Println()
 
-	fmt.Println("=== 字段匹配情况 ===")
+	// 推断成功端点归属站点 key：优先当前站点，URL 对不上则按 URL 重推
+	winSite := siteKey
+	if winSite == "" || !strings.Contains(strings.ToLower(w.ep), strings.ToLower(winSite)) {
+		winSite = defaultSiteKeyForURL(w.ep)
+	}
+
+	// 字段：用当前站点的 fields（保留用户已探测的映射），缺项补默认
+	fields := map[string][]string{}
+	if resolved {
+		for k, v := range curEP.Fields {
+			fields[k] = v
+		}
+	}
+	for k, v := range glmDefaultFields {
+		if _, ok := fields[k]; !ok {
+			fields[k] = v
+		}
+	}
+
 	var m map[string]interface{}
 	if json.Unmarshal([]byte(w.body), &m) != nil {
-		fmt.Println("   ⚠️  响应不是 JSON 对象，无法自动匹配")
-		return
-	}
-	allOK := true
-	for _, key := range []string{"used_pct", "used", "total", "mcp_pct"} {
-		if v, ok := dig(m, cfg.Fields[key]...); ok {
-			fmt.Printf("   ✓ %-9s 命中，值 = %v\n", key, v)
-		} else {
-			fmt.Printf("   ✗ %-9s 没匹配上，候选名: %s\n", key, strings.Join(cfg.Fields[key], ", "))
-			if key == "used_pct" || key == "used" {
-				allOK = false
+		fmt.Println("⚠️  响应不是 JSON 对象，无法自动匹配字段（端点仍可用，下方配置照贴）")
+	} else {
+		fmt.Println("=== 字段匹配情况 ===")
+		allOK := true
+		for _, key := range []string{"used_pct", "used", "total", "mcp_pct"} {
+			if v, ok := dig(m, fields[key]...); ok {
+				fmt.Printf("   ✓ %-9s 命中，值 = %v\n", key, v)
+			} else {
+				fmt.Printf("   ✗ %-9s 没匹配上，候选名: %s\n", key, strings.Join(fields[key], ", "))
+				if key == "used_pct" || key == "used" {
+					allOK = false
+				}
 			}
+		}
+		fmt.Println()
+		if allOK {
+			fmt.Println("✓ 关键字段都能取到，直接写配置即可用。")
+		} else {
+			fmt.Println("⚠️  关键字段没匹配上。从上面的响应里找出对应的 key，")
+			fmt.Println("   加进该站点 fields 里（是列表，可以多写几个候选）。")
 		}
 	}
 	fmt.Println()
 
-	if allOK {
-		fmt.Println("✓ 关键字段都能取到，直接写配置即可用。")
-	} else {
-		fmt.Println("⚠️  关键字段没匹配上。从上面的响应里找出对应的 key，")
-		fmt.Println("   加进 glm.json 的 fields 里（是列表，可以多写几个候选）。")
+	// 输出可直接粘贴的 endpoints 结构：先带已有站点，只覆盖当前这条，其他站点不碰。
+	out := map[string]glmEndpoint{}
+	for k, v := range cfg.Endpoints {
+		out[k] = v
 	}
-	fmt.Println()
-	fmt.Printf("建议写入 %s:\n\n", glmCfgPath)
-	suggested := glmConfig{Endpoint: w.ep, AuthScheme: w.scheme, Fields: cfg.Fields}
-	b, _ := json.MarshalIndent(suggested, "", "  ")
+	out[winSite] = glmEndpoint{URL: w.ep, AuthScheme: w.scheme, Fields: fields}
+	for k, v := range glmDefaultEndpoints {
+		if _, exists := out[k]; !exists {
+			out[k] = v
+		}
+	}
+
+	fmt.Printf("建议写入 %s 的 endpoints（其他站点已带上，不会被覆盖）:\n\n", glmCfgPath)
+	b, _ := json.MarshalIndent(glmConfig{Endpoints: out}, "", "  ")
 	fmt.Println(string(b))
 	fmt.Println()
 	fmt.Println("改完不用重新编译，下次渲染就生效。")
@@ -1836,13 +2029,17 @@ func hasManualPrice(entry map[string]json.RawMessage) bool {
 	return fieldNonNull(entry, "input") || fieldNonNull(entry, "output")
 }
 
-func backupPricing() (string, error) {
-	src, err := os.ReadFile(pricingPath)
+func backupFile(path string) (string, error) {
+	src, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	dst := pricingPath + ".bak-" + time.Now().Format("20060102-150405")
+	dst := path + ".bak-" + time.Now().Format("20060102-150405")
 	return dst, os.WriteFile(dst, src, 0o600)
+}
+
+func backupPricing() (string, error) {
+	return backupFile(pricingPath)
 }
 
 func cmdSyncPricing(args []string) {
