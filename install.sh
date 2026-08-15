@@ -11,6 +11,11 @@
 #   ./install.sh --no-tmux          只装 statusline
 #   ./install.sh --no-notify        wait 时不发系统通知
 #   ./install.sh --done-ttl 600     done 多久褪成 idle，0=不褪
+#   ./install.sh --no-dir           标签栏不显示每个 tab 的目录
+#   ./install.sh --dir-max 12       目录段最多占几列（默认 18，超出截断）
+#   ./install.sh --dir-full         目录段总是显示完整路径（默认与窗口名重复时省略末级）
+#   ./install.sh --no-title         pane 边框仍显示进程名，不显示你输入的内容
+#   ./install.sh --title-max 24     标题最多占几列（默认 40）
 #
 set -uo pipefail
 
@@ -18,6 +23,7 @@ echo "===== SCRIPT START ====="
 echo
 
 DRY_RUN=0; ASCII=0; SUBSHELL=0; NO_TMUX=0; NOTIFY=1; DONE_TTL=900
+NO_DIR=0; DIR_MAX=18; DIR_FULL=0; NO_TITLE=0; TITLE_MAX=40
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run)   DRY_RUN=1 ;;
@@ -26,7 +32,12 @@ while [ $# -gt 0 ]; do
         --no-tmux)   NO_TMUX=1 ;;
         --no-notify) NOTIFY=0 ;;
         --done-ttl)  shift; DONE_TTL="${1:-900}" ;;
-        -h|--help)   sed -n '2,18p' "$0"; echo "===== SCRIPT END ====="; exit 0 ;;
+        --no-dir)    NO_DIR=1 ;;
+        --dir-max)   shift; DIR_MAX="${1:-18}" ;;
+        --dir-full)  DIR_FULL=1 ;;
+        --no-title)  NO_TITLE=1 ;;
+        --title-max) shift; TITLE_MAX="${1:-40}" ;;
+        -h|--help)   sed -n '2,19p' "$0"; echo "===== SCRIPT END ====="; exit 0 ;;
         *)           echo "⚠️  未知参数: $1 （已忽略）" ;;
     esac
     shift
@@ -35,6 +46,15 @@ done
 case "${DONE_TTL}" in
     ''|*[!0-9]*) echo "✗ --done-ttl 必须是非负整数"; echo; echo "===== SCRIPT END ====="; exit 1 ;;
 esac
+case "${DIR_MAX}" in
+    ''|*[!0-9]*) echo "✗ --dir-max 必须是正整数"; echo; echo "===== SCRIPT END ====="; exit 1 ;;
+esac
+case "${TITLE_MAX}" in
+    ''|*[!0-9]*) echo "✗ --title-max 必须是正整数"; echo; echo "===== SCRIPT END ====="; exit 1 ;;
+esac
+# hook 存进 tmux option 的上限要盖得住显示上限，否则 --title-max 调大也没料可显示
+TITLE_STORE=120
+[ "${TITLE_MAX}" -gt "${TITLE_STORE}" ] && TITLE_STORE=$((TITLE_MAX + 20))
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -112,16 +132,20 @@ else
     for h in state.sh win-state.sh; do
         [ -f "${ROOT}/hooks/${h}" ] || { echo "✗ 项目里缺 hooks/${h}"; continue; }
         if [ "${DRY_RUN}" -eq 0 ]; then
-            # NOTIFY / DONE_TTL 是部署时注入的，项目里那份是模板
+            # NOTIFY / DONE_TTL / TITLE 是部署时注入的，项目里那份是模板。
+            # TITLE_STORE 是「存进 tmux option 的上限」，跟显示上限
+            # （--title-max，由 tmux/setup.sh 用）是两码事，别混。
             sed -e "s/^NOTIFY=.*/NOTIFY=${NOTIFY}/" \
                 -e "s/^DONE_TTL=.*/DONE_TTL=${DONE_TTL}/" \
+                -e "s/^TITLE=.*/TITLE=$((1 - NO_TITLE))/" \
+                -e "s/^TITLE_STORE=.*/TITLE_STORE=${TITLE_STORE}/" \
                 "${ROOT}/hooks/${h}" > "${HOOK_DIR}/${h}"
             chmod 0755 "${HOOK_DIR}/${h}"
             bash -n "${HOOK_DIR}/${h}" || echo "   ✗ ${h} 语法错误"
         fi
         echo "✓ ${HOOK_DIR}/${h}"
     done
-    echo "   通知=${NOTIFY}  done 褪色=${DONE_TTL}s"
+    echo "   通知=${NOTIFY}  done 褪色=${DONE_TTL}s  pane 标题=$((1 - NO_TITLE))"
 fi
 echo
 
@@ -156,6 +180,10 @@ else
     [ "${ASCII}" -eq 1 ]    && TARGS="${TARGS} --ascii"
     [ "${SUBSHELL}" -eq 1 ] && TARGS="${TARGS} --subshell"
     [ "${DRY_RUN}" -eq 1 ]  && TARGS="${TARGS} --dry-run"
+    [ "${NO_DIR}" -eq 1 ]   && TARGS="${TARGS} --no-dir"
+    [ "${DIR_FULL}" -eq 1 ] && TARGS="${TARGS} --dir-full"
+    [ "${NO_TITLE}" -eq 1 ] && TARGS="${TARGS} --no-title"
+    TARGS="${TARGS} --dir-max ${DIR_MAX} --title-max ${TITLE_MAX}"
     bash "${ROOT}/tmux/setup.sh" ${TARGS}
 fi
 echo

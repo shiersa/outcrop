@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# outcrop 卸载器。移除 tmux managed block、还原标签栏样式、
+# outcrop 卸载器。移除 tmux managed block、还原标签栏和 pane 边框、
 # 清掉 settings.json 里的 statusLine 和 hook、删除已部署的 hook 脚本。
 #
 # 不会删 ~/.config/claude-statusline 下的配置和 cache —— 那里有你填过的东西。
