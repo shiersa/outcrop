@@ -7,6 +7,9 @@ DONE_TTL=900
 NOTIFY=1
 TITLE=1
 TITLE_STORE=120
+# 往后凑句子凑到几列为止 —— 由 install.sh 按 --title-max 注入，
+# 要和 pane 边框宽档的显示上限一致，否则要么留白要么白算
+TITLE_FILL=40
 
 STATE="${1:-idle}"
 [ -z "${TMUX_PANE:-}" ] && exit 0
@@ -39,7 +42,7 @@ tmux set-option -p -t "$TMUX_PANE" @claude_state "$STATE" 2>/dev/null || true
 if [ "$TITLE" = "1" ] && [ "$STATE" = "busy" ] && [ ! -t 0 ] \
    && command -v python3 >/dev/null 2>&1; then
     T="$(python3 -c '
-import json, os, re, sys
+import json, os, re, sys, unicodedata
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -60,12 +63,28 @@ except Exception:
     pass
 # 开头的标点先剥掉，否则首段是空的，只能整句退回 ——
 # 「？开头是问号，第二句在这」会把两句都显示出来。
-stripped = p.lstrip("。！？；，、.!?; \t\n")
-# 第一句：中文标点 / 换行 / 后面跟空白的西文句读，取最先出现的那个。
-# 西文句读要求后跟空白，否则 file.go、v2.1 这种会被从中间切开。
-head = re.split(r"[。！？；，、\n]|[.!?;](?=\s|$)", stripped, 1)[0].strip()
-# 整句都是标点时 stripped 为空，那就老老实实显示原文
-p = head or stripped or p
+stripped = p.lstrip("。！？；，、.!?; \t\n") or p
+
+
+def cols(s):
+    # 中文一个字占两列，按字符数算会让中文标题只用掉一半边框
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+
+
+# 句子边界：中文标点 / 换行 / 后面跟空白的西文句读。
+# 西文句读要求后跟空白，否则 main.go、v2.1、/opt/a/c.txt 会被从中间切开。
+SEP = re.compile(r"[。！？；，、\n]|[.!?;](?=\s|$)")
+# 不是只取第一句 —— 第一句短的时候（「记一下，以后直接提交到 main」的
+# 「记一下」只有 6 列）边框会大片空着。改成一句一句往后加，加到放不下为止，
+# 且永远断在句子边界上，不会切出半句话。
+bounds = [m.start() for m in SEP.finditer(stripped)] + [len(stripped)]
+fill = int(sys.argv[3])
+pick = bounds[0]          # 第一句就超宽也得留着，后面交给显示层截
+for b in bounds:
+    if cols(stripped[:b]) > fill:
+        break
+    pick = b
+p = stripped[:pick].strip() or stripped
 p = re.sub(r"[\x00-\x1f\x7f]", " ", p)
 p = re.sub(r"\s+", " ", p).strip()
 n = int(sys.argv[1])
@@ -73,7 +92,7 @@ if len(p) > n:
     p = p[:n] + "…"
 # tmux 会把 #[...] 当样式指令吃掉（#() 和 #{} 倒是不展开）。# 加倍才是字面量。
 sys.stdout.write(p.replace("#", "##"))
-' "$TITLE_STORE" "$DIR" 2>/dev/null)" || T=""
+' "$TITLE_STORE" "$DIR" "$TITLE_FILL" 2>/dev/null)" || T=""
     [ -n "$T" ] && tmux set-option -p -t "$TMUX_PANE" @claude_prompt "$T" 2>/dev/null
 fi
 # 会话结束就把标题摘掉，否则 pane 回到 shell 了边框还挂着上一轮的输入

@@ -139,6 +139,7 @@ else
                 -e "s/^DONE_TTL=.*/DONE_TTL=${DONE_TTL}/" \
                 -e "s/^TITLE=.*/TITLE=$((1 - NO_TITLE))/" \
                 -e "s/^TITLE_STORE=.*/TITLE_STORE=${TITLE_STORE}/" \
+                -e "s/^TITLE_FILL=.*/TITLE_FILL=${TITLE_MAX}/" \
                 "${ROOT}/hooks/${h}" > "${HOOK_DIR}/${h}"
             chmod 0755 "${HOOK_DIR}/${h}"
             bash -n "${HOOK_DIR}/${h}" || echo "   ✗ ${h} 语法错误"
