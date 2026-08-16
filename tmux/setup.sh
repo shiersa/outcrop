@@ -11,18 +11,24 @@
 #   2. 包装 window-status-format 前要先把原值存下来，否则卸载时还原不回去；
 #      重复运行还要能识别"已经包过一层"，不然会套娃。
 #
-# 用法: setup.sh [--ascii] [--subshell] [--no-dir] [--dir-max N] [--dir-full]
-#                [--no-title] [--title-max N] [--dry-run] [--uninstall]
+# 用法: setup.sh [--ascii] [--subshell] [--no-dir] [--tab-dir] [--dir-max N]
+#                [--dir-full] [--no-title] [--title-max N]
+#                [--dry-run] [--uninstall]
 #
 set -uo pipefail
 
+# TAB_DIR 默认关：标签栏里 pane_current_path 解析的是 window 的**当前 pane**，
+# 一个 tab 分了屏，它就只代表其中一块，却看着像整个 tab 的目录 —— 是误导。
+# pane 边框上每块各显各的，那里才是目录该待的地方。
 DRY_RUN=0; ASCII=0; SUBSHELL=0; UNINSTALL=0; DIR=1; DIR_MAX=18; DIR_FULLMODE=0
+TAB_DIR=0
 TITLE=1; TITLE_MAX=40
 while [ $# -gt 0 ]; do
     case "${1}" in
         --ascii)     ASCII=1 ;;
         --subshell)  SUBSHELL=1 ;;
         --no-dir)    DIR=0 ;;
+        --tab-dir)   TAB_DIR=1 ;;
         --dir-max)   shift; DIR_MAX="${1:-18}" ;;
         --dir-full)  DIR_FULLMODE=1 ;;
         --no-title)  TITLE=0 ;;
@@ -224,7 +230,7 @@ WIN_ICON="#{?#{==:${E},busy},${C_BUSY}${I_BUSY}${ICON_SEP}#[default],#{?#{==:${E
 DIR_FULL='#{s|(\.?[^/])[^/]*/|\1/|:#{s|^#{HOME}|~|:pane_current_path}}'
 
 DIR_SEG=""; PD_FULL=""; PD_BASE=""
-if [ "${DIR}" -eq 1 ]; then
+if [ "${DIR}" -eq 1 ] && [ "${TAB_DIR}" -eq 1 ]; then
     # 父路径：先取 dirname 再缩写。dirname 之后末级不再是「你要认的名字」，
     # 所以补一条 /(\.?[^/])[^/]*$ 把它也缩掉，~/PrivateProject 才会变成 ~/P。
     DIR_PARENT='#{s|/(\.?[^/])[^/]*$|/\1|:#{s|(\.?[^/])[^/]*/|\1/|:#{s|^#{HOME}|~|:#{d:pane_current_path}}}}'
@@ -245,21 +251,20 @@ if [ "${DIR}" -eq 1 ]; then
 
     # 路径可能为空（pane 还没起来），空值时整段跳过，别留个孤零零的分隔符
     DIR_SEG="#{?pane_current_path,${C_DIR}#{=/${DIR_MAX}/${I_ELL}:${DIR_PATH}}#[default] ,}"
+fi
 
-    # --- pane 边框上的目录段 ---------------------------------------------
-    #
-    # 分屏才是真正需要它的场合：标签栏只显示 window 当前 pane 的目录，
-    # 一分屏另外几块就没地方看了。
-    #
-    # 这里不做「与窗口名重复就省略」那套 —— pane 边框上没有窗口名，不存在
-    # 重复，每块都该显示完整路径。
-    #
-    # 但 pane 会窄。窄到装不下时 tmux 直接从右边硬切，切掉的正是末级那个
-    # 你要认的名字（~/P/o/c/statusline 变成 ~/P/o/c/statu，看着还像个完整
-    # 路径）。所以按 pane_width 分档主动降级，宁可少显示也不显示半截。
-    #
-    # 注意比较必须用 #{e|>=:a,b}（数值）。#{>=:a,b} 是字典序，"100" < "50"，
-    # 宽 pane 反而会被判成窄的。
+# --- pane 边框上的目录段（默认唯一的目录显示处）---------------------------
+#
+# 这里不做「与窗口名重复就省略」那套 —— pane 边框上没有窗口名，不存在
+# 重复，每块都该显示完整路径。
+#
+# 但 pane 会窄。窄到装不下时 tmux 直接从右边硬切，切掉的正是末级那个
+# 你要认的名字（~/P/o/c/statusline 变成 ~/P/o/c/statu，看着还像个完整
+# 路径）。所以按 pane_width 分档主动降级，宁可少显示也不显示半截。
+#
+# 注意比较必须用 #{e|>=:a,b}（数值）。#{>=:a,b} 是字典序，"100" < "50"，
+# 宽 pane 反而会被判成窄的。
+if [ "${DIR}" -eq 1 ]; then
     PD_FULL=" ${C_DIR}#{=/${DIR_MAX}/${I_ELL}:${DIR_FULL}}#[default]"
     PD_BASE=" ${C_DIR}#{=/10/${I_ELL}:#{b:pane_current_path}}#[default]"
 fi

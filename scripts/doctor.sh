@@ -106,6 +106,12 @@ else
     DIR_ON=0
     if grep -q '|~|:pane_current_path' "${TMUX_CONF}"; then
         DIR_ON=1
+        grep -q 'pane-border-format.*|~|:pane_current_path' "${TMUX_CONF}" \
+            && ok "pane 边框目录段已配（分屏后每块显示自己的目录）" \
+            || warn "pane 边框没有目录段，分屏后看不到各自的目录"
+
+        # 标签栏目录段默认是关的：那里的 pane_current_path 只代表 window 的
+        # 当前 pane，一分屏就成了误导。--tab-dir 才打开。
         # 套娃自检只看 window-status-*：pane-border-format 每次都是从字面量
         # 重新拼的，不可能套娃，而且它内部本来就按宽度分档重复引用目录链，
         # 全局计数会一直误报。会被反复包装的只有标签栏（它包的是你原有的主题）。
@@ -113,14 +119,13 @@ else
         # 套娃时行数不变，用 -c 永远发现不了。
         DUP="$(grep 'window-status' "${TMUX_CONF}" 2>/dev/null \
                | grep -o '|~|:pane_current_path' | wc -l | tr -d ' ')"
-        if [ "${DUP}" -gt 2 ]; then
+        if [ "${DUP}" -eq 0 ]; then
+            ok "标签栏无目录段（默认；--tab-dir 可开）"
+        elif [ "${DUP}" -gt 2 ]; then
             bad "标签栏目录段出现 ${DUP} 次（正常 2 次：普通 tab + 当前 tab），被套娃了"
         else
-            ok "标签栏目录段已配"
+            ok "标签栏目录段已配（--tab-dir）"
         fi
-        grep -q 'pane-border-format.*|~|:pane_current_path' "${TMUX_CONF}" \
-            && ok "pane 边框目录段已配（分屏后每块显示自己的目录）" \
-            || warn "pane 边框没有目录段，分屏后看不到各自的目录"
         # 宽度分档必须走 #{e|>=:} 数值比较；写成 #{>=:} 是字典序，
         # "100" < "50"，宽 pane 会被误判成窄的而只显示末级
         if grep -q 'pane-border-format' "${TMUX_CONF}" \

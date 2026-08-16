@@ -21,7 +21,8 @@ set -uo pipefail
 MENU_ITEMS=(
     "组件|head|||装哪几层|||"
     "组件|bool|TMUX_ON|tmux 状态图标|pane 边框和标签栏显示 Claude 在忙 / 等你介入|||"
-    "组件|bool|DIR_ON|标签栏与边框显示目录|~/P/outcrop，开多了不必靠记|||"
+    "组件|bool|DIR_ON|pane 边框显示目录|~/P/outcrop，分屏后每块各显各的|||"
+    "组件|bool|TAB_DIR|标签栏也显示目录|多 pane 时只代表当前那块，容易误导，默认关|||"
     "组件|bool|TITLE_ON|边框显示你输入的内容|替代没信息量的进程名（zsh / 2.1.231）|||"
     "样式|head|||长什么样|||"
     "样式|bool|ASCII|图标用 ASCII|Nerd Font 显示成豆腐块时勾上|||"
@@ -32,7 +33,7 @@ MENU_ITEMS=(
     "行为|num|DONE_TTL|done 褪色秒数|跑完的绿色多久褪成灰，0 = 不褪|0|1800|300"
 )
 
-TMUX_ON=1; DIR_ON=1; TITLE_ON=1; ASCII=0
+TMUX_ON=1; DIR_ON=1; TAB_DIR=0; TITLE_ON=1; ASCII=0
 DIR_MAX=18; TITLE_MAX=40; NOTIFY=1; DONE_TTL=900
 
 MENU_FLAGS=""
@@ -46,7 +47,12 @@ menu_build_flags() {
     MENU_FLAGS=""
     [ "${TMUX_ON}" -eq 0 ]  && MENU_FLAGS="${MENU_FLAGS} --no-tmux"
     [ "${ASCII}" -eq 1 ]    && MENU_FLAGS="${MENU_FLAGS} --ascii"
-    [ "${DIR_ON}" -eq 0 ]   && MENU_FLAGS="${MENU_FLAGS} --no-dir"
+    # --no-dir 连标签栏一起关，这时再给 --tab-dir 就是自相矛盾的命令行
+    if [ "${DIR_ON}" -eq 0 ]; then
+        MENU_FLAGS="${MENU_FLAGS} --no-dir"
+    elif [ "${TAB_DIR}" -eq 1 ]; then
+        MENU_FLAGS="${MENU_FLAGS} --tab-dir"
+    fi
     [ "${TITLE_ON}" -eq 0 ] && MENU_FLAGS="${MENU_FLAGS} --no-title"
     [ "${DIR_MAX}" -ne 18 ]   && MENU_FLAGS="${MENU_FLAGS} --dir-max ${DIR_MAX}"
     [ "${TITLE_MAX}" -ne 40 ] && MENU_FLAGS="${MENU_FLAGS} --title-max ${TITLE_MAX}"
@@ -58,10 +64,10 @@ menu_build_flags() {
 # 依赖关系：tmux 层关掉后，下面三项就没有意义了
 menu_dimmed() {
     case "$1" in
-        DIR_ON|TITLE_ON|ASCII|DIR_MAX|TITLE_MAX) [ "${TMUX_ON}" -eq 0 ] && return 0 ;;
+        DIR_ON|TAB_DIR|TITLE_ON|ASCII|DIR_MAX|TITLE_MAX) [ "${TMUX_ON}" -eq 0 ] && return 0 ;;
     esac
     case "$1" in
-        DIR_MAX)   [ "${DIR_ON}" -eq 0 ] && return 0 ;;
+        TAB_DIR|DIR_MAX) [ "${DIR_ON}" -eq 0 ] && return 0 ;;
         TITLE_MAX) [ "${TITLE_ON}" -eq 0 ] && return 0 ;;
     esac
     return 1
