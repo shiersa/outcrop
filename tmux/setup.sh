@@ -57,10 +57,13 @@ END_MARK="# ===== outcrop END ====="
 #
 # 用标准区符号而不是 Nerd Font 私有区：私有区字形在没装补丁字体的终端上是
 # 豆腐块，比空白更糟。●✓· 这几个几乎所有字体都有。
+# wait 用 ? 不用 !：wait 的三个来源（选项询问 / 计划审批 / 权限请求）本质上
+# 都是「在问你」，而 ! 读作警告，和红底一样属于报错语义 —— 错的不是状态，
+# 是符号。ASCII 模式同样用 ?，它本来就是 ASCII。
 if [ "${ASCII}" -eq 1 ]; then
-    I_BUSY='*'; I_WAIT='!'; I_DONE='+'; I_HINT='o'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'
+    I_BUSY='*'; I_WAIT='?'; I_DONE='+'; I_HINT='o'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'
 else
-    I_BUSY='●'; I_WAIT='!'; I_DONE='✓'; I_HINT='○'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'
+    I_BUSY='●'; I_WAIT='?'; I_DONE='✓'; I_HINT='○'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'
 fi
 
 # wait 用底色而不只是前景色：小图标在余光里太容易漏掉，而这是唯一不该错过
