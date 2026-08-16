@@ -198,7 +198,8 @@ fi
 
 # --- 构造格式串 -----------------------------------------------------------
 PANE_ICON="#{?#{==:#{@claude_state},busy},${C_BUSY}${I_BUSY}#[default],#{?#{==:#{@claude_state},wait},${C_WAIT}${I_WAIT}#[default],#{?#{==:#{@claude_state},done},${C_DONE}${I_DONE}#[default],#{?#{==:#{@claude_state},hint},${C_HINT}${I_HINT}#[default],${C_IDLE}${I_IDLE}#[default]}}}}"
-PANE_FMT="${PANE_ICON} #{pane_index}:"
+# 冒号跟着内容走，不做固定前缀 —— 最窄那档没有内容，留个 "1:" 很怪
+PANE_FMT="${PANE_ICON} #{pane_index}"
 
 if [ "${SUBSHELL}" -eq 1 ]; then
     E="#(${WIN_SH} --read #{window_id})"
@@ -305,7 +306,7 @@ fi
 OVH=12
 DW=0; [ "${DIR}" -eq 1 ] && DW="${DIR_MAX}"
 
-PB_CMD="#{pane_current_command}"
+PB_CMD=":#{pane_current_command}"
 if [ "${DIR}" -eq 1 ]; then
     PB_CMD="${PB_CMD}#{?pane_current_path,#{?#{e|>=:#{pane_width},46},${PD_FULL},#{?#{e|>=:#{pane_width},20},${PD_BASE},}},}"
 fi
@@ -316,7 +317,14 @@ if [ "${TITLE}" -eq 1 ]; then
     TT_NARROW=10;[ "${TITLE_MAX}" -lt "${TT_NARROW}" ] && TT_NARROW="${TITLE_MAX}"
     TT_TINY=8;   [ "${TITLE_MAX}" -lt "${TT_TINY}" ]   && TT_TINY="${TITLE_MAX}"
 
+    # 最窄那档不能没有下界：pane 宽度可以手动拖到 1（tmux 没有下限），
+    # 而这档一路管到底的话，下面全靠 tmux 硬切兜底 —— 它切得干净（不会切坏
+    # 多字节字符），但**不留任何截断标记**，你会以为看到的就是全部。
+    # 所以再补一档：窄到连「最短标题 + 标记」都放不下时，索性只留图标和序号。
+    # 无目录时的固定开销实测 8 列（── + 前导空格 + 图标 + 空格 + "N:" + 尾空格），
+    # 再加标记 1 列。
     TB_NARROW=$(( OVH + TT_NARROW ))
+    TB_MIN=$(( 9 + TT_TINY + 1 ))
     TB_MID=$(( OVH + TT_MID + DW ))
     TB_WIDE=$(( OVH + TITLE_MAX + DW ))
     # TITLE_MAX 调得比 20 还小时宽档会掉到中档下面，档位顺序就乱了
@@ -326,7 +334,7 @@ if [ "${TITLE}" -eq 1 ]; then
     T_MID="#{=/${TT_MID}/${I_ELL}:#{@claude_prompt}}"
     T_NARROW="#{=/${TT_NARROW}/${I_ELL}:#{@claude_prompt}}"
     T_TINY="#{=/${TT_TINY}/${I_ELL}:#{@claude_prompt}}"
-    PB_TITLE="#{?#{e|>=:#{pane_width},${TB_WIDE}},${C_TITLE}${T_WIDE}#[default]${PD_FULL},#{?#{e|>=:#{pane_width},${TB_MID}},${C_TITLE}${T_MID}#[default]${PD_FULL},#{?#{e|>=:#{pane_width},${TB_NARROW}},${C_TITLE}${T_NARROW}#[default],${C_TITLE}${T_TINY}#[default]}}}"
+    PB_TITLE="#{?#{e|>=:#{pane_width},${TB_WIDE}},:${C_TITLE}${T_WIDE}#[default]${PD_FULL},#{?#{e|>=:#{pane_width},${TB_MID}},:${C_TITLE}${T_MID}#[default]${PD_FULL},#{?#{e|>=:#{pane_width},${TB_NARROW}},:${C_TITLE}${T_NARROW}#[default],#{?#{e|>=:#{pane_width},${TB_MIN}},:${C_TITLE}${T_TINY}#[default],}}}}"
     PANE_FMT="${PANE_FMT}#{?#{@claude_prompt},${PB_TITLE},${PB_CMD}}"
 else
     PANE_FMT="${PANE_FMT}${PB_CMD}"
