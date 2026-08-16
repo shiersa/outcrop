@@ -195,6 +195,11 @@ wait 用底色不用前景色，是因为小图标在余光里太容易漏掉，
 
 没数据的 widget 整段跳过，不显示占位符。改配置不需要重新编译。
 
+**顺序即优先级**：终端窄了从右边开始丢，所以最该看的放最左。默认顺序是
+`ctx` `quota` `cost` `model` `tokens` `cache` `burn` —— ctx 决定你什么时候
+该 /compact，是唯一会逼你动手的数字；quota 决定你还能不能继续。花了多少、
+跑多快这些是事后回看的，靠右。
+
 ## 子命令
 
     claude-statusline --verify       自检
@@ -207,6 +212,17 @@ wait 用底色不用前景色，是因为小图标在余光里太容易漏掉，
 
 这些都是踩过之后才知道的，重构时别丢：
 
+- **statusline 的输入里没有终端宽度。** `--dump-input` 可查 —— Claude Code
+  给了 context_window / rate_limits / cost 等等，就是没有宽度。而 statusline
+  的 stdout 是管道不是 tty，所以只能自己打开 `/dev/tty` 走 TIOCGWINSZ。
+  纯 stdlib，不起子进程（这东西每次重绘都跑，fork 一个 tput 不能接受）。
+  拿不到就退回「不截断」。
+- **算宽度时 `█░│` 是单宽，不是双宽。** 它们是 East Asian Ambiguous/Neutral。
+  当成双宽的话，光是三个分隔符加两条进度条就虚高十几列，字段会被过早丢掉。
+  真正双宽的只有 CJK 和全角形式。
+- **字段名差一个后缀就全盘失效。** `rate_limits.five_hour.used_percentage`
+  曾经被写成找 `used_pct` / `used_percent`，于是额度一直显示 `quota n/a` ——
+  数据一直都在。这类「猜字段名」的地方一定要用 `--dump-input` 对一遍实际输入。
 - **增量扫描是性能的全部来源。** 实测 30MB transcript：全量 ~310ms，
   增量 5-9ms。而同样全量扫描下 Go(319ms) 并不比 Python(307ms) 快 ——
   换语言换来的是单二进制和依赖确定性，不是速度。

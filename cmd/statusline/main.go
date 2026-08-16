@@ -24,7 +24,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unicode"
+	"unsafe"
 )
 
 // ---------------------------------------------------------------------------
@@ -36,11 +39,11 @@ var (
 	baseDir  = filepath.Join(configHome(), "claude-statusline")
 	cacheDir = filepath.Join(baseDir, "cache")
 
-	pricingPath = filepath.Join(baseDir, "pricing.json")
-	ctxWinPath  = filepath.Join(baseDir, "context_windows.json")
-	displayPath = filepath.Join(baseDir, "display.json")
-	glmCfgPath  = filepath.Join(baseDir, "glm.json")
-	lastInput   = filepath.Join(cacheDir, "last-input.json")
+	pricingPath  = filepath.Join(baseDir, "pricing.json")
+	ctxWinPath   = filepath.Join(baseDir, "context_windows.json")
+	displayPath  = filepath.Join(baseDir, "display.json")
+	glmCfgPath   = filepath.Join(baseDir, "glm.json")
+	lastInput    = filepath.Join(cacheDir, "last-input.json")
 	litellmCache = filepath.Join(cacheDir, "litellm-prices.json")
 )
 
@@ -292,6 +295,81 @@ type input struct {
 // ---------------------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 终端宽度
+//
+// Claude Code 的 statusline 输入里**没有**宽度字段（--dump-input 可查），
+// 而 statusline 的 stdout 是管道、不是 tty，所以只能自己去问终端：
+// 打开 /dev/tty 拿控制终端，走 TIOCGWINSZ。纯 stdlib，不起子进程 ——
+// 这东西每次重绘都会跑，fork 一个 tput 是不能接受的。
+// 在 tmux 里 /dev/tty 给的是当前 pane 的宽度，正是我们要的那个。
+// 拿不到就返回 0，调用方据此退回「不截断」，跟改动前行为一致。
+func termWidth() int {
+	f, err := os.Open("/dev/tty")
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	var ws struct{ Row, Col, Xpix, Ypix uint16 }
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(),
+		uintptr(syscall.TIOCGWINSZ), uintptr(unsafe.Pointer(&ws)))
+	if errno != 0 {
+		return 0
+	}
+	return int(ws.Col)
+}
+
+// dispWidth 算的是「占几列」，不是字符数也不是字节数：
+// ANSI 转义序列不占列，中文和 █ 这类宽字符占两列。
+// 按字符数算的话中文段会被高估一倍，宽度判断全错。
+func dispWidth(s string) int {
+	w, inEsc := 0, false
+	for _, r := range s {
+		if inEsc {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEsc = false
+			}
+			continue
+		}
+		if r == 0x1b {
+			inEsc = true
+			continue
+		}
+		// 只有真正的双宽字符才算 2。制表符 │ 和方块 █░ 属于
+		// East Asian Ambiguous/Neutral，实际占 1 列 —— 把它们算成 2，
+		// 光是三个分隔符加两条进度条就会虚高十几列，导致过早丢字段。
+		if unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) ||
+			unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r) ||
+			(r >= 0xff01 && r <= 0xff60) || (r >= 0xffe0 && r <= 0xffe6) {
+			w += 2
+			continue
+		}
+		w++
+	}
+	return w
+}
+
+// fitSegs 从右往左丢，直到装得下。左边的先保住 —— 这就是为什么
+// defaultLine 的顺序即优先级。width<=0（拿不到宽度）时原样返回。
+func fitSegs(segs []string, width int) []string {
+	if width <= 0 || len(segs) == 0 {
+		return segs
+	}
+	sepW := dispWidth(sep)
+	total := 0
+	for i, s := range segs {
+		total += dispWidth(s)
+		if i > 0 {
+			total += sepW
+		}
+	}
+	for len(segs) > 1 && total > width {
+		total -= dispWidth(segs[len(segs)-1]) + sepW
+		segs = segs[:len(segs)-1]
+	}
+	return segs
+}
 
 func bar(pct float64, width int) string {
 	if pct < 0 {
@@ -716,7 +794,7 @@ func (d displayConfig) layout() [][]string {
 		return d.Lines
 	}
 	if d.CacheHit != nil || d.BurnRate != nil || d.TokenBreakdown != nil {
-		row := []string{"model", "quota", "tokens", "cost"}
+		row := []string{"ctx", "quota", "cost", "model", "tokens"}
 		if on(d.CacheHit, true) {
 			row = append(row, "cache")
 		}
@@ -726,7 +804,7 @@ func (d displayConfig) layout() [][]string {
 		if on(d.TokenBreakdown, false) {
 			row = append(row, "breakdown")
 		}
-		return [][]string{append(row, "ctx")}
+		return [][]string{row}
 	}
 	return [][]string{defaultLine}
 }
@@ -959,7 +1037,7 @@ func renderRateLimits(raw json.RawMessage) string {
 		if node == nil {
 			continue
 		}
-		p, ok := dig(node, "used_pct", "utilization", "percent_used", "used_percent")
+		p, ok := dig(node, "used_percentage", "used_pct", "utilization", "percent_used", "used_percent")
 		if !ok {
 			used, ok1 := dig(node, "used", "used_tokens")
 			lim, ok2 := dig(node, "limit", "total", "max")
@@ -1166,7 +1244,11 @@ var widgets = map[string]func(widgetCtx) string{
 }
 
 // 单行时的默认顺序。多行由 display.json 的 lines 决定。
-var defaultLine = []string{"model", "quota", "tokens", "cost", "cache", "burn", "ctx"}
+// 顺序即优先级：窄了从右边开始丢，所以最该看的放最左。
+// ctx 第一 —— 它决定你什么时候该 /compact，是唯一会逼你动手的数字。
+// quota 第二 —— 5h/周额度，决定你还能不能继续。
+// 其余（花了多少、跑多快、缓存命中）是事后回看的，靠右。
+var defaultLine = []string{"ctx", "quota", "cost", "model", "tokens", "cache", "burn"}
 
 func renderGLMQuota() string {
 	cfg := loadGLMConfig()
@@ -1287,6 +1369,7 @@ func render(in input, raw map[string]interface{}) string {
 	c := widgetCtx{in: in, raw: raw, t: t, provider: provider, modelID: modelID}
 
 	layout := loadDisplay().layout()
+	tw := termWidth()
 	out := make([]string, 0, len(layout))
 	for _, row := range layout {
 		segs := make([]string, 0, len(row))
@@ -1300,7 +1383,7 @@ func render(in input, raw map[string]interface{}) string {
 			}
 		}
 		if len(segs) > 0 {
-			out = append(out, strings.Join(segs, sep))
+			out = append(out, strings.Join(fitSegs(segs, tw), sep))
 		}
 	}
 	return strings.Join(out, "\n")
