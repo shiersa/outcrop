@@ -144,10 +144,21 @@ echo "✓ ${ARCHIVE} （$(ls -lh "${ARCHIVE}" | awk '{print $5}')）"
 echo "✓ ${ARCHIVE}.sha256"
 echo
 
+# 自解压安装包：单文件，目标机器上一条命令搞定，且自带载荷校验
+SELF_SH="${DIST}/outcrop-${VERSION}-darwin-${ARCH_TAG}.sh"
+bash "${ROOT}/scripts/mkself.sh" "${ARCHIVE}" "${VERSION}" "${SELF_SH}"
+( cd "${DIST}" && shasum -a 256 "$(basename "${SELF_SH}")" > "$(basename "${SELF_SH}").sha256" )
+echo "✓ ${SELF_SH}.sha256"
+echo
+
 # 包内二进制架构，便于核对
 echo "包内二进制架构: $(lipo -archs "${PKGDIR}/${BIN_NAME}" 2>/dev/null || echo "(lipo 不可用)")"
 echo
-echo "目标机器安装:"
-echo "   shasum -a 256 -c ${ARCHIVE_NAME}.sha256    # 校验"
+echo "目标机器安装（推荐，单文件，自带校验）:"
+echo "   bash $(basename "${SELF_SH}")"
+echo "   bash $(basename "${SELF_SH}") --help    # 全部开关"
+echo
+echo "或者用 tar 包:"
+echo "   shasum -a 256 -c ${ARCHIVE_NAME}.sha256"
 echo "   tar xzf ${ARCHIVE_NAME}"
 echo "   cd outcrop && ./install.sh"

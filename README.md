@@ -117,7 +117,26 @@ tab 多到装不下时 tmux 会悄悄把一部分挪出可视区，`doctor.sh` �
 
        ./scripts/release.sh
 
-   产出 `dist/outcrop-<版本>-darwin-universal.tar.gz` 和 `.sha256`。
+   产出两种形式，内容一样：
+
+   | 文件 | 用法 |
+   |---|---|
+   | `outcrop-<版本>-darwin-universal.sh` | `bash outcrop-<版本>.sh`，一条命令 |
+   | `outcrop-<版本>-darwin-universal.tar.gz` | 老办法，解压后 `./install.sh` |
+
+   自解压那份把 tar 直接接在一段 shell 头部后面，跑起来先自校验载荷
+   （省掉手动 `shasum -c`），再解到临时目录调 `install.sh`，装完清理。
+   全部开关照常透传：`bash outcrop-<版本>.sh --ascii --dir-max 12`。
+   `--extract-only` 只解包不安装。
+
+   不做 .pkg / .dmg：这个工具的安装是**配置合并**（往 `.tmux.conf` 塞
+   managed block、合并 N 个 `settings.json` 且要保住别人的 hook），不是拖文件。
+   pkg 没有命令行参数，七个开关全丢；29 项核查输出会被埋进安装器日志；
+   macOS 的 pkg 还没有卸载机制。再加上没有 Developer ID 证书，双击会被
+   Gatekeeper 拦——比 `./install.sh` 更麻烦，不是更省事。
+
+   卸载器和核查脚本由 `install.sh` 装进 `~/.config/claude-tmux/tools/`，
+   所以自解压包用完即弃，以后照样卸得掉、查得了。
    版本号取自 `git describe --tags --always --dirty`，注入进了二进制，
    `claude-statusline --version` 可查 —— 多台机器装不同版本时靠它分清。
 

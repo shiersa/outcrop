@@ -62,6 +62,7 @@ SL_DIR="${HOME}/.config/claude-statusline"
 HOOK_DIR="${HOME}/.config/claude-tmux"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-tmux"
 BIN="${SL_DIR}/claude-statusline"
+TOOLS_DIR="${HOOK_DIR}/tools"
 
 # 两用：包根目录有可执行的 claude-statusline 就是发布包（直接 cp），否则现场编译。
 PREBUILT=0
@@ -163,6 +164,31 @@ else
         echo "✓ ${HOOK_DIR}/${h}"
     done
     echo "   通知=${NOTIFY}  done 褪色=${DONE_TTL}s  pane 标题=$((1 - NO_TITLE))"
+fi
+echo
+
+# 卸载器和核查脚本要留在机器上 —— 自解压安装包装完就把临时目录删了，
+# 不留一份的话这套东西以后既卸不掉也查不了。
+# 目录结构照搬仓库布局，uninstall.sh 里的 ${ROOT}/tmux/setup.sh 才能解析到。
+echo "===== 3b. 维护脚本 ====="
+echo
+if [ "${DRY_RUN}" -eq 1 ]; then
+    echo "   [dry-run] 部署 uninstall.sh / doctor.sh 到 ${TOOLS_DIR}"
+else
+    mkdir -p "${TOOLS_DIR}/tmux" "${TOOLS_DIR}/scripts"
+    for rel in uninstall.sh tmux/setup.sh scripts/register.py scripts/doctor.sh; do
+        if [ -f "${ROOT}/${rel}" ]; then
+            # 内容一样就别动，免得每次安装都刷新时间戳
+            cmp -s "${ROOT}/${rel}" "${TOOLS_DIR}/${rel}" 2>/dev/null \
+                || cp "${ROOT}/${rel}" "${TOOLS_DIR}/${rel}"
+            chmod 0755 "${TOOLS_DIR}/${rel}"
+        else
+            echo "   ⚠️  缺 ${rel}"
+        fi
+    done
+    echo "✓ ${TOOLS_DIR}/"
+    echo "   卸载: bash ${TOOLS_DIR}/uninstall.sh"
+    echo "   核查: bash ${TOOLS_DIR}/scripts/doctor.sh"
 fi
 echo
 
