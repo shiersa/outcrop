@@ -7,25 +7,33 @@ DONE_TTL=900
 DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-tmux"
 command -v tmux >/dev/null 2>&1 || exit 0
 
+# hint 排在 done 下面：hint 是「跑完之后又晾了 60 秒」，比刚跑完更旧，
+# 一个 window 里同时有这两种 pane 时该显示更新的那个。
 rank() {
     case "$1" in
-        wait) echo 3 ;;
-        busy) echo 2 ;;
-        done) echo 1 ;;
+        wait) echo 4 ;;
+        busy) echo 3 ;;
+        done) echo 2 ;;
+        hint) echo 1 ;;
         *)    echo 0 ;;
     esac
 }
 
 read_state() {
-    # $1 = pane_id。输出状态，done 过期则输出 idle
+    # $1 = pane_id。输出状态，done / hint 过期则输出 idle
+    # hint 也要褪 —— 它本来就是「闲了一会儿」，挂三天更没意义。
+    # wait 不褪：真在等你决策的信号消失了比留着更糟。
     local f="$DIR/${1#%}" s t now
     [ -f "$f" ] || { echo ""; return; }
     s="$(cut -d' ' -f1 "$f" 2>/dev/null)"
     t="$(cut -d' ' -f2 "$f" 2>/dev/null)"
-    if [ "$s" = "done" ] && [ "${DONE_TTL:-0}" -gt 0 ] && [ -n "$t" ]; then
-        now="$(date +%s)"
-        if [ $((now - t)) -gt "$DONE_TTL" ]; then echo ""; return; fi
-    fi
+    case "$s" in
+        done|hint)
+            if [ "${DONE_TTL:-0}" -gt 0 ] && [ -n "$t" ]; then
+                now="$(date +%s)"
+                if [ $((now - t)) -gt "$DONE_TTL" ]; then echo ""; return; fi
+            fi ;;
+    esac
     echo "$s"
 }
 

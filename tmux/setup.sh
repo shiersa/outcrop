@@ -58,15 +58,21 @@ END_MARK="# ===== outcrop END ====="
 # 用标准区符号而不是 Nerd Font 私有区：私有区字形在没装补丁字体的终端上是
 # 豆腐块，比空白更糟。●✓· 这几个几乎所有字体都有。
 if [ "${ASCII}" -eq 1 ]; then
-    I_BUSY='*'; I_WAIT='!'; I_DONE='+'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'
+    I_BUSY='*'; I_WAIT='!'; I_DONE='+'; I_HINT='o'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'
 else
-    I_BUSY='●'; I_WAIT='!'; I_DONE='✓'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'
+    I_BUSY='●'; I_WAIT='!'; I_DONE='✓'; I_HINT='○'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'
 fi
 
-# wait 用白字红底：红色小图标在余光里太容易漏掉，而这是唯一不该错过的状态
+# wait 用底色而不只是前景色：小图标在余光里太容易漏掉，而这是唯一不该错过
+# 的状态。但底色用青不用红 —— 红色读作「出错了」，而 wait 的意思是「该你了」，
+# 语义完全不同。真出错的时候 Claude 自己会说，不需要标签栏来喊。
+#
+# hint 只给前景色、不给底色：它是「闲着」，不需要你做任何事，
+# 显著度必须明显低于 wait，否则又回到「什么都在喊」的老问题。
 C_BUSY='#[fg=colour214]'
-C_WAIT='#[fg=colour231#,bg=colour160#,bold]'
+C_WAIT='#[fg=colour232#,bg=colour44#,bold]'
 C_DONE='#[fg=colour114]'
+C_HINT='#[fg=colour109]'
 C_IDLE='#[fg=colour240]'
 # 目录用中灰：既要比 window name 弱（它才是主体），又要在高亮的当前 tab
 # 底色上读得出来。colour245 在两种底色下都够。
@@ -174,7 +180,7 @@ PYEOF
 fi
 
 # --- 构造格式串 -----------------------------------------------------------
-PANE_ICON="#{?#{==:#{@claude_state},busy},${C_BUSY}${I_BUSY}#[default],#{?#{==:#{@claude_state},wait},${C_WAIT}${I_WAIT}#[default],#{?#{==:#{@claude_state},done},${C_DONE}${I_DONE}#[default],${C_IDLE}${I_IDLE}#[default]}}}"
+PANE_ICON="#{?#{==:#{@claude_state},busy},${C_BUSY}${I_BUSY}#[default],#{?#{==:#{@claude_state},wait},${C_WAIT}${I_WAIT}#[default],#{?#{==:#{@claude_state},done},${C_DONE}${I_DONE}#[default],#{?#{==:#{@claude_state},hint},${C_HINT}${I_HINT}#[default],${C_IDLE}${I_IDLE}#[default]}}}}"
 PANE_FMT="${PANE_ICON} #{pane_index}:"
 
 if [ "${SUBSHELL}" -eq 1 ]; then
@@ -189,7 +195,7 @@ case "${WSF}" in
     ' '*) ICON_SEP='' ;;
     *)    ICON_SEP=' ' ;;
 esac
-WIN_ICON="#{?#{==:${E},busy},${C_BUSY}${I_BUSY}${ICON_SEP}#[default],#{?#{==:${E},wait},${C_WAIT}${I_WAIT}${ICON_SEP}#[default],#{?#{==:${E},done},${C_DONE}${I_DONE}${ICON_SEP}#[default],${I_WIDLE}}}}"
+WIN_ICON="#{?#{==:${E},busy},${C_BUSY}${I_BUSY}${ICON_SEP}#[default],#{?#{==:${E},wait},${C_WAIT}${I_WAIT}${ICON_SEP}#[default],#{?#{==:${E},done},${C_DONE}${I_DONE}${ICON_SEP}#[default],#{?#{==:${E},hint},${C_HINT}${I_HINT}${ICON_SEP}#[default],${I_WIDLE}}}}}"
 
 # --- 目录段：标签栏和 pane 边框各自显示自己在哪 ---------------------------
 #

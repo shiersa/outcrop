@@ -170,7 +170,8 @@ else
             bad "标签栏渲染为空"
         fi
         case "${R}" in
-            *"#[fg=colour231"*) ok "wait 走到了白字红底分支" ;;
+            *"bg=colour44"*) ok "wait 走到了青底分支" ;;
+            *"bg=colour160"*) warn "wait 仍是旧的红底 —— 重跑 tmux/setup.sh 更新" ;;
             *) warn "wait 分支没渲染出预期配色（--ascii 模式下属正常）" ;;
         esac
         # 目录段真的算出路径了吗 —— 正则写错时 tmux 不报错，只是渲染成空
