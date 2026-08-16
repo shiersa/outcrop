@@ -67,13 +67,14 @@ else
 fi
 
 # wait 用底色而不只是前景色：小图标在余光里太容易漏掉，而这是唯一不该错过
-# 的状态。但底色用青不用红 —— 红色读作「出错了」，而 wait 的意思是「该你了」，
+# 的状态。底色用橙不用红 —— 红色读作「出错了」，而 wait 的意思是「该你了」，
 # 语义完全不同。真出错的时候 Claude 自己会说，不需要标签栏来喊。
+# busy 让出橙色改用青：跑着的时候不需要抢眼，抢眼的名额只有一个，得留给 wait。
 #
 # hint 只给前景色、不给底色：它是「闲着」，不需要你做任何事，
 # 显著度必须明显低于 wait，否则又回到「什么都在喊」的老问题。
-C_BUSY='#[fg=colour214]'
-C_WAIT='#[fg=colour232#,bg=colour44#,bold]'
+C_BUSY='#[fg=colour44]'
+C_WAIT='#[fg=colour232#,bg=colour208#,bold]'
 C_DONE='#[fg=colour114]'
 C_HINT='#[fg=colour109]'
 C_IDLE='#[fg=colour240]'
