@@ -13,7 +13,7 @@
 #   ./install.sh --done-ttl 600     done 多久褪成 idle，0=不褪
 #   ./install.sh --no-dir           pane 边框也不显示目录
 #   ./install.sh --tab-dir          标签栏也显示目录（多 pane 时只代表当前那块）
-#   ./install.sh --dir-max 12       目录段最多占几列（默认 18，超出截断）
+#   ./install.sh --dir-max 12       目录段最多占几列（默认 28，超出保末尾截断）
 #   ./install.sh --dir-full         目录段总是显示完整路径（默认与窗口名重复时省略末级）
 #   ./install.sh --no-title         pane 边框仍显示进程名，不显示你输入的内容
 #   ./install.sh --title-max 24     标题最多占几列（默认 40）
@@ -27,7 +27,7 @@ echo "===== SCRIPT START ====="
 echo
 
 DRY_RUN=0; ASCII=0; SUBSHELL=0; NO_TMUX=0; NOTIFY=1; DONE_TTL=900
-NO_DIR=0; TAB_DIR=0; DIR_MAX=18; DIR_FULL=0; NO_TITLE=0; TITLE_MAX=40
+NO_DIR=0; TAB_DIR=0; DIR_MAX=28; DIR_FULL=0; NO_TITLE=0; TITLE_MAX=40
 NO_MENU=0
 
 # 记下哪些是用户显式写的 —— 写了开关就说明他知道自己要什么，别再弹菜单打断
@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
         --done-ttl)  shift; DONE_TTL="${1:-900}" ;;
         --no-dir)    NO_DIR=1 ;;
         --tab-dir)   TAB_DIR=1 ;;
-        --dir-max)   shift; DIR_MAX="${1:-18}" ;;
+        --dir-max)   shift; DIR_MAX="${1:-28}" ;;
         --dir-full)  DIR_FULL=1 ;;
         --no-title)  NO_TITLE=1 ;;
         --title-max) shift; TITLE_MAX="${1:-40}" ;;

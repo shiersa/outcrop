@@ -20,7 +20,7 @@ set -uo pipefail
 # TAB_DIR 默认关：标签栏里 pane_current_path 解析的是 window 的**当前 pane**，
 # 一个 tab 分了屏，它就只代表其中一块，却看着像整个 tab 的目录 —— 是误导。
 # pane 边框上每块各显各的，那里才是目录该待的地方。
-DRY_RUN=0; ASCII=0; SUBSHELL=0; UNINSTALL=0; DIR=1; DIR_MAX=18; DIR_FULLMODE=0
+DRY_RUN=0; ASCII=0; SUBSHELL=0; UNINSTALL=0; DIR=1; DIR_MAX=28; DIR_FULLMODE=0
 TAB_DIR=0
 TITLE=1; TITLE_MAX=40
 while [ $# -gt 0 ]; do
@@ -29,7 +29,7 @@ while [ $# -gt 0 ]; do
         --subshell)  SUBSHELL=1 ;;
         --no-dir)    DIR=0 ;;
         --tab-dir)   TAB_DIR=1 ;;
-        --dir-max)   shift; DIR_MAX="${1:-18}" ;;
+        --dir-max)   shift; DIR_MAX="${1:-28}" ;;
         --dir-full)  DIR_FULLMODE=1 ;;
         --no-title)  TITLE=0 ;;
         --title-max) shift; TITLE_MAX="${1:-40}" ;;
@@ -272,7 +272,11 @@ fi
 # 注意比较必须用 #{e|>=:a,b}（数值）。#{>=:a,b} 是字典序，"100" < "50"，
 # 宽 pane 反而会被判成窄的。
 if [ "${DIR}" -eq 1 ]; then
-    PD_FULL=" ${C_DIR}#{=/${DIR_MAX}/${I_ELL}:${DIR_FULL}}#[default]"
+    # 截断保末尾不保开头：这套缩写的前提就是「末级留全名 —— 这正是你要认的
+    # 那个名字」，右截断砍掉的恰恰是它。#{=/-N/…} 的标记会落在开头。
+    # 顺带一提，深路径触发不了截断：6 层深缩完也才 18 列
+    # （~/P/o/c/s/i/render），真正会超的只有「末级名字本身很长」。
+    PD_FULL=" ${C_DIR}#{=/-${DIR_MAX}/${I_ELL}:${DIR_FULL}}#[default]"
     PD_BASE=" ${C_DIR}#{=/10/${I_ELL}:#{b:pane_current_path}}#[default]"
 fi
 
@@ -296,7 +300,9 @@ fi
 # 曾经按 8 估、把中档起点定在 46，结果 9+20+18=47 溢出 1 列，
 # tmux 默默把目录末尾砍掉一个字符 —— 正是这套分档要防的事。
 # DIR_MAX / TITLE_MAX 可调，所以起点必须跟着它们走。
-OVH=10   # 装饰 9 列，留 1 列余量
+# 装饰实测 9 列；标题和目录各自的截断标记（…）是**额外**加的，
+# 也就是 #{=/N/…} 最多占 N+1 列 —— 两个各 +1。再留 1 列余量。
+OVH=12
 DW=0; [ "${DIR}" -eq 1 ] && DW="${DIR_MAX}"
 
 PB_CMD="#{pane_current_command}"

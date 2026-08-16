@@ -26,7 +26,7 @@ MENU_ITEMS=(
     "组件|bool|TITLE_ON|边框显示你输入的内容|替代没信息量的进程名（zsh / 2.1.231）|||"
     "样式|head|||长什么样|||"
     "样式|bool|ASCII|图标退成纯 ASCII|● ✓ · … 显示成方块时才需要，一般不用勾|||"
-    "样式|num|DIR_MAX|目录段宽度|超出从右侧截断|6|40|2"
+    "样式|num|DIR_MAX|目录段宽度|超出保末尾截断（末级名字才是你要认的）|8|48|4"
     "样式|num|TITLE_MAX|标题宽度|超出按句子边界收窄|8|80|4"
     "行为|head|||怎么提醒你|||"
     "行为|bool|NOTIFY|需要你介入时发系统通知|这是唯一不该错过的状态|||"
@@ -34,7 +34,7 @@ MENU_ITEMS=(
 )
 
 TMUX_ON=1; DIR_ON=1; TAB_DIR=0; TITLE_ON=1; ASCII=0
-DIR_MAX=18; TITLE_MAX=40; NOTIFY=1; DONE_TTL=900
+DIR_MAX=28; TITLE_MAX=40; NOTIFY=1; DONE_TTL=900
 
 MENU_FLAGS=""
 
@@ -54,7 +54,7 @@ menu_build_flags() {
         MENU_FLAGS="${MENU_FLAGS} --tab-dir"
     fi
     [ "${TITLE_ON}" -eq 0 ] && MENU_FLAGS="${MENU_FLAGS} --no-title"
-    [ "${DIR_MAX}" -ne 18 ]   && MENU_FLAGS="${MENU_FLAGS} --dir-max ${DIR_MAX}"
+    [ "${DIR_MAX}" -ne 28 ]   && MENU_FLAGS="${MENU_FLAGS} --dir-max ${DIR_MAX}"
     [ "${TITLE_MAX}" -ne 40 ] && MENU_FLAGS="${MENU_FLAGS} --title-max ${TITLE_MAX}"
     [ "${NOTIFY}" -eq 0 ]   && MENU_FLAGS="${MENU_FLAGS} --no-notify"
     [ "${DONE_TTL}" -ne 900 ] && MENU_FLAGS="${MENU_FLAGS} --done-ttl ${DONE_TTL}"
