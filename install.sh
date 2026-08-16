@@ -16,6 +16,9 @@
 #   ./install.sh --dir-full         目录段总是显示完整路径（默认与窗口名重复时省略末级）
 #   ./install.sh --no-title         pane 边框仍显示进程名，不显示你输入的内容
 #   ./install.sh --title-max 24     标题最多占几列（默认 40）
+#   ./install.sh --yes              跳过交互菜单，直接按默认装
+#
+# 不带任何配置开关、且在终端里运行时，会先弹一个勾选菜单。
 #
 set -uo pipefail
 
@@ -24,6 +27,17 @@ echo
 
 DRY_RUN=0; ASCII=0; SUBSHELL=0; NO_TMUX=0; NOTIFY=1; DONE_TTL=900
 NO_DIR=0; DIR_MAX=18; DIR_FULL=0; NO_TITLE=0; TITLE_MAX=40
+NO_MENU=0
+
+# 记下哪些是用户显式写的 —— 写了开关就说明他知道自己要什么，别再弹菜单打断
+CONFIG_ARGS=0
+for a in "$@"; do
+    case "${a}" in
+        --dry-run|-h|--help|--no-menu|--yes|-y) ;;
+        --*) CONFIG_ARGS=1 ;;
+    esac
+done
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run)   DRY_RUN=1 ;;
@@ -37,11 +51,30 @@ while [ $# -gt 0 ]; do
         --dir-full)  DIR_FULL=1 ;;
         --no-title)  NO_TITLE=1 ;;
         --title-max) shift; TITLE_MAX="${1:-40}" ;;
-        -h|--help)   sed -n '2,19p' "$0"; echo "===== SCRIPT END ====="; exit 0 ;;
+        --no-menu|--yes|-y) NO_MENU=1 ;;
+        -h|--help)   sed -n '2,21p' "$0"; echo "===== SCRIPT END ====="; exit 0 ;;
         *)           echo "⚠️  未知参数: $1 （已忽略）" ;;
     esac
     shift
 done
+
+# 交互菜单。只在终端里、且没写任何配置开关时弹 —— 管道里、CI 里、
+# 已经写明开关的场合都必须安静走默认值，否则脚本化安装会卡死在没人按的菜单前。
+MENU_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/menu.sh"
+if [ "${NO_MENU}" -eq 0 ] && [ "${CONFIG_ARGS}" -eq 0 ] && [ -f "${MENU_SH}" ]; then
+    # shellcheck source=scripts/menu.sh
+    . "${MENU_SH}"
+    if menu_supported; then
+        if menu_run; then
+            NO_TMUX=$((1 - TMUX_ON)); NO_DIR=$((1 - DIR_ON)); NO_TITLE=$((1 - TITLE_ON))
+            echo
+            echo "   已选: ./install.sh ${MENU_FLAGS:-（全部默认）}"
+            echo
+        else
+            echo "===== SCRIPT END ====="; exit 0
+        fi
+    fi
+fi
 
 case "${DONE_TTL}" in
     ''|*[!0-9]*) echo "✗ --done-ttl 必须是非负整数"; echo; echo "===== SCRIPT END ====="; exit 1 ;;
