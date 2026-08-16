@@ -67,9 +67,9 @@ END_MARK="# ===== outcrop END ====="
 # 都是「在问你」，而 ! 读作警告，和红底一样属于报错语义 —— 错的不是状态，
 # 是符号。ASCII 模式同样用 ?，它本来就是 ASCII。
 if [ "${ASCII}" -eq 1 ]; then
-    I_BUSY='*'; I_WAIT='?'; I_DONE='+'; I_HINT='o'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'
+    I_BUSY='*'; I_WAIT='?'; I_DONE='+'; I_HINT='~'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'
 else
-    I_BUSY='●'; I_WAIT='?'; I_DONE='✓'; I_HINT='○'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'
+    I_BUSY='●'; I_WAIT='?'; I_DONE='✓'; I_HINT='~'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'
 fi
 
 # wait 用底色而不只是前景色：小图标在余光里太容易漏掉，而这是唯一不该错过
@@ -79,10 +79,15 @@ fi
 #
 # hint 只给前景色、不给底色：它是「闲着」，不需要你做任何事，
 # 显著度必须明显低于 wait，否则又回到「什么都在喊」的老问题。
-C_BUSY='#[fg=colour44]'
+# 都加 bold：标签栏主题往往偏暗（这台机器上普通 tab 是 fg=#6c7086），
+# 细笔画的图标在上面几乎看不出来。加粗不改色相，只把笔画加重。
+C_BUSY='#[fg=colour44#,bold]'
 C_WAIT='#[fg=colour232#,bg=colour208#,bold]'
-C_DONE='#[fg=colour114]'
-C_HINT='#[fg=colour109]'
+C_DONE='#[fg=colour114#,bold]'
+# hint 用 done 绿的淡版：它总是跟在 done 后面（跑完了又晾了一会儿），
+# 语义上连得上。原先的 colour109 是灰蓝，和标签栏自身的文字色同一个色系，
+# 看着像普通文字而不像标记 —— 标记的颜色必须跳出背景文字的色系。
+C_HINT='#[fg=colour108#,bold]'
 C_IDLE='#[fg=colour240]'
 # 目录用中灰：既要比 window name 弱（它才是主体），又要在高亮的当前 tab
 # 底色上读得出来。colour245 在两种底色下都够。
