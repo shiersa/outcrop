@@ -75,6 +75,8 @@ fi
 remove_block() {
     [ -f "${TMUX_CONF}" ] || return 0
     [ "${DRY_RUN}" -eq 1 ] && { echo "   [dry-run] 移除 managed block"; return 0; }
+    # 没有 block 就没什么可移除的，别为此留一份备份
+    grep -qF "${BEGIN_MARK}" "${TMUX_CONF}" 2>/dev/null || return 0
     cp "${TMUX_CONF}" "${TMUX_CONF}.bak-${TS}"
     python3 - "${TMUX_CONF}" "${BEGIN_MARK}" "${END_MARK}" <<'PYEOF'
 import sys
@@ -304,13 +306,16 @@ if [ "${DRY_RUN}" -eq 1 ]; then
     exit 0
 fi
 
-[ -f "${TMUX_CONF}" ] && cp "${TMUX_CONF}" "${TMUX_CONF}.bak-${TS}" || touch "${TMUX_CONF}"
+# 备份不在这里做 —— 那时还不知道内容会不会变。下面两段 python 各自在真正
+# 要落盘前才 cp，内容没变就什么都不留。早先无条件 cp 一份，于是每跑一次
+# install.sh 就多一份 .tmux.conf.bak-*，全是同样的内容。
+[ -f "${TMUX_CONF}" ] || touch "${TMUX_CONF}"
 
 # 清掉 11/14/17 留下的旧 managed block。两套块共存时后出现的会覆盖先出现的，
 # 表现为「改了配置没生效」，而且极难看出原因。
-python3 - "${TMUX_CONF}" <<'CLEAN_EOF'
-import os, sys
-path = sys.argv[1]
+python3 - "${TMUX_CONF}" "${TS}" <<'CLEAN_EOF'
+import os, shutil, sys
+path, ts = sys.argv[1:3]
 LEGACY = [
     ("# ===== claude-tmux-status BEGIN", "# ===== claude-tmux-status END"),
     ("# ===== claude-tmux-winstatus BEGIN", "# ===== claude-tmux-winstatus END"),
@@ -339,6 +344,7 @@ while out and out[-1].strip() == "":
     out.pop()
 out.append("\n")
 if removed:
+    shutil.copy2(path, "%s.bak-%s" % (path, ts))
     tmp = path + ".tmp"
     open(tmp, "w", encoding="utf-8").writelines(out)
     os.replace(tmp, path)
@@ -346,9 +352,9 @@ if removed:
         print("   \u2713 \u5df2\u6e05\u7406\u65e7\u5757: %s" % r)
 CLEAN_EOF
 
-python3 - "${TMUX_CONF}" "${BEGIN_MARK}" "${END_MARK}" "${PANE_FMT}" "${WIN_ICON}" "${WSF}" "${WSCF}" <<'PYEOF'
-import os, sys
-path, begin, end, pane_fmt, icon, wsf, wscf = sys.argv[1:8]
+python3 - "${TMUX_CONF}" "${BEGIN_MARK}" "${END_MARK}" "${PANE_FMT}" "${WIN_ICON}" "${WSF}" "${WSCF}" "${TS}" <<'PYEOF'
+import os, shutil, sys
+path, begin, end, pane_fmt, icon, wsf, wscf, ts = sys.argv[1:9]
 
 def q(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
@@ -390,6 +396,13 @@ while out and out[-1].strip() == "":
     out.pop()
 out.append("\n")
 
+# 内容一模一样就别落盘，也别留备份。重复跑 install.sh 是常态，
+# 每次都 cp 一份同样的内容出来，几十份 .bak 就是这么攒起来的。
+if out == lines:
+    print("   - managed block 无变化（未改动，不产生备份）")
+    sys.exit(0)
+
+shutil.copy2(path, "%s.bak-%s" % (path, ts))
 tmp = path + ".tmp"
 open(tmp, "w", encoding="utf-8").writelines(out)
 os.replace(tmp, path)

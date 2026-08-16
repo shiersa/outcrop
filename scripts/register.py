@@ -17,6 +17,7 @@
   register.py --binary PATH --state PATH --win PATH [--remove] [--dry-run]
 """
 import argparse
+import copy
 import json
 import os
 import shutil
@@ -60,17 +61,19 @@ def apply(path, binary, scripts, remove, dry):
             print("   ✗ 解析失败 %s (%s)" % (path, e))
             return False
 
-    changed = False
+    # 改动与否只能靠比对最终结果来判断。下面重建 hook 条目时无法边走边判断
+    # ——「先清掉自己的再按需重建」这个做法每次都会动到结构，即使结果一模一样。
+    # 早先靠一个 changed 标志，它在重建循环里被无条件置真，于是每次 install
+    # 都备份 + 重写一遍 settings.json，攒出几十份内容相同的 .bak。
+    original = copy.deepcopy(data)
 
     if remove:
         if "statusLine" in data:
             del data["statusLine"]
-            changed = True
     else:
         want = {"type": "command", "command": binary, "padding": 0}
         if data.get("statusLine") != want:
             data["statusLine"] = want
-            changed = True
 
     hooks = data.get("hooks") or {}
 
@@ -83,8 +86,6 @@ def apply(path, binary, scripts, remove, dry):
                 continue
             inner = [h for h in entry.get("hooks", [])
                      if not (isinstance(h, dict) and is_ours(h.get("command", ""), scripts))]
-            if len(inner) != len(entry.get("hooks", [])):
-                changed = True
             if inner:
                 entry["hooks"] = inner
                 kept.append(entry)
@@ -102,15 +103,14 @@ def apply(path, binary, scripts, remove, dry):
                 if matcher:
                     entry["matcher"] = matcher
                 entries.append(entry)
-                changed = True
 
     if hooks:
         data["hooks"] = hooks
     elif "hooks" in data:
         del data["hooks"]
 
-    if not changed:
-        print("   - %s 已是最新" % path)
+    if data == original:
+        print("   - %s 已是最新（未改动，不产生备份）" % path)
         return True
     if dry:
         print("   [dry-run] %s" % path)
