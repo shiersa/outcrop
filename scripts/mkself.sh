@@ -31,7 +31,7 @@ cat > "${HEADER}" <<HEADER_EOF
 #
 # 用法:
 #   bash \$(basename "\$0")                 按默认配置安装
-#   bash \$(basename "\$0") --ascii         Nerd Font 显示成豆腐块时
+#   bash \$(basename "\$0") --ascii         图标退成纯 ASCII
 #   bash \$(basename "\$0") --help          全部开关
 #   bash \$(basename "\$0") --extract-only  只解包，不安装
 #

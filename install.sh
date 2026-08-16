@@ -6,7 +6,7 @@
 # 用法:
 #   ./install.sh
 #   ./install.sh --dry-run
-#   ./install.sh --ascii            图标用 ASCII（Nerd Font 显示成豆腐块时）
+#   ./install.sh --ascii            图标退成纯 ASCII（● ✓ · … 显示成方块时）
 #   ./install.sh --subshell         标签栏改用子进程渲染
 #   ./install.sh --no-tmux          只装 statusline
 #   ./install.sh --no-notify        wait 时不发系统通知

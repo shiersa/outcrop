@@ -84,7 +84,7 @@ pane 边框不做「与窗口名重复就省略」那套（边框上没有窗口
 会编译二进制、部署 hook、写 tmux 配置、注册进所有 `CLAUDE_CONFIG_DIR`，
 最后跑一遍完整性核查。已存在的配置文件不会被覆盖。
 
-    ./install.sh --ascii        Nerd Font 显示成豆腐块时用
+    ./install.sh --ascii        图标退成纯 ASCII（● ✓ · … 显示成方块时）
     ./install.sh --no-tmux      只装 statusline
     ./install.sh --no-notify    wait 时不发系统通知
     ./install.sh --done-ttl 0   done 状态不自动褪色
