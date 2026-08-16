@@ -7,7 +7,8 @@
   Stop                                  -> done   跑完了
   SessionEnd                            -> idle   会话结束
   Notification                          -> hint   闲置 60 秒，不需要你做什么
-  PreToolUse(AskUserQuestion|ExitPlanMode) -> wait 选项询问 / 计划审批
+  PreToolUse(AskUserQuestion|ExitPlanMode)  -> wait 选项询问 / 计划审批
+  PostToolUse(AskUserQuestion|ExitPlanMode) -> busy 你答完了，我继续干
   PermissionRequest                     -> wait   权限请求
 
 后两条是补上去的。最初只挂了 Notification，结果开着 bypass permissions 时
@@ -16,6 +17,10 @@
 Notification 原先也映射成 wait，但它同时覆盖「需要授权」和「闲置 60 秒」
 两种情况，后者根本不需要你做什么。而真要你决策的场合已经被下面两条各自
 盖住了，所以它降级成 hint —— 否则一个三天前的闲置提醒会一直挂着最高警报。
+
+PostToolUse 那条是补的：回答 AskUserQuestion 走的是工具结果，**不产生
+UserPromptSubmit**。而 wait 是粘性的、只有 busy/idle 能清除，于是你答完之后
+整轮都卡在 wait —— 我明明在干活，标签栏却一直显示「在问你」。
 
 用法:
   register.py --binary PATH --state PATH --win PATH [--remove] [--dry-run]
@@ -34,6 +39,7 @@ EVENTS = [
     ("SessionEnd", "", "idle"),
     ("Notification", "", "hint"),
     ("PreToolUse", "AskUserQuestion|ExitPlanMode", "wait"),
+    ("PostToolUse", "AskUserQuestion|ExitPlanMode", "busy"),
     ("PermissionRequest", "", "wait"),
 ]
 

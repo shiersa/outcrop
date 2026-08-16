@@ -225,6 +225,11 @@ wait 用底色不用前景色，是因为小图标在余光里太容易漏掉，
   done 会超时褪成灰。
 - **`AskUserQuestion` / `ExitPlanMode` 走 `PreToolUse` 而不是 `Notification`。**
   只挂 Notification 的话，开着 bypass permissions 时计划审批完全没有信号。
+- **回答 AskUserQuestion 不产生 `UserPromptSubmit`。** 那是工具结果，不是新的
+  用户输入。而 wait 是粘性的、只有 busy/idle 能清除 —— 于是你答完之后整轮都
+  卡在 wait，Claude 明明在干活，标签栏却一直显示「在问你」。补一条
+  `PostToolUse(AskUserQuestion|ExitPlanMode) -> busy`：工具**返回**就等于你
+  答完了。设计粘性状态时，必须为每个「粘住」的入口都想清楚出口在哪。
 - **一个事件同时代表两件事，就不能只映射成一个状态。** `Notification` 既在
   「需要授权」时触发，也在「闲置 60 秒」时触发，后者根本不需要你做什么。
   它原先和真决策点共用最高警报，加上 wait 永不褪色，结果是三天前的一次闲置
