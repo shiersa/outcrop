@@ -98,24 +98,40 @@ else
 fi
 echo
 run "mkdir -p '${SL_DIR}/cache' '${HOOK_DIR}' '${STATE_DIR}'"
+# 二进制 5MB 一份，无条件备份最伤 —— 曾攒到 18 份 104MB，其中只有 6 种。
+# 和 .tmux.conf / settings.json 一样：先比对，一样就既不备份也不覆盖。
 if [ "${PREBUILT}" -eq 1 ]; then
     if [ "${DRY_RUN}" -eq 0 ]; then
-        [ -f "${BIN}" ] && cp "${BIN}" "${BIN}.bak-${TS}"
-        cp "${ROOT}/claude-statusline" "${BIN}"
-        chmod 0755 "${BIN}"
-        # 没有代码签名，从网络传过去的二进制会被 macOS 隔离，
-        # 运行时报"无法验证开发者"——cp 之后去掉隔离属性。
-        xattr -dr com.apple.quarantine "${BIN}" 2>/dev/null || true
-        ARCH="$(file "${BIN}" | grep -oE 'universal|arm64|x86_64' | head -1)"
-        echo "✓ ${BIN} （$(ls -lh "${BIN}" | awk '{print $5}')，预编译 ${ARCH}）"
+        if [ -f "${BIN}" ] && cmp -s "${ROOT}/claude-statusline" "${BIN}"; then
+            echo "-  ${BIN} 已是最新（未改动，不产生备份）"
+        else
+            [ -f "${BIN}" ] && cp "${BIN}" "${BIN}.bak-${TS}"
+            cp "${ROOT}/claude-statusline" "${BIN}"
+            chmod 0755 "${BIN}"
+            # 没有代码签名，从网络传过去的二进制会被 macOS 隔离，
+            # 运行时报"无法验证开发者"——cp 之后去掉隔离属性。
+            xattr -dr com.apple.quarantine "${BIN}" 2>/dev/null || true
+            ARCH="$(file "${BIN}" | grep -oE 'universal|arm64|x86_64' | head -1)"
+            echo "✓ ${BIN} （$(ls -lh "${BIN}" | awk '{print $5}')，预编译 ${ARCH}）"
+        fi
     else
         echo "   [dry-run] cp 预编译二进制 -> ${BIN}"
     fi
 elif [ "${DRY_RUN}" -eq 0 ]; then
-    [ -f "${BIN}" ] && cp "${BIN}" "${BIN}.bak-${TS}"
-    if ( cd "${ROOT}" && GOFLAGS=-mod=mod go build -ldflags="-s -w" -o "${BIN}" ./cmd/statusline ); then
-        echo "✓ ${BIN} （$(ls -lh "${BIN}" | awk '{print $5}')，$(uname -m)）"
+    # 先编到临时文件才知道结果和现有的一不一样。编失败时旧二进制没被碰过。
+    NEWBIN="${BIN}.new-${TS}"
+    if ( cd "${ROOT}" && GOFLAGS=-mod=mod go build -ldflags="-s -w" -o "${NEWBIN}" ./cmd/statusline ); then
+        if [ -f "${BIN}" ] && cmp -s "${NEWBIN}" "${BIN}"; then
+            rm -f "${NEWBIN}"
+            echo "-  ${BIN} 已是最新（未改动，不产生备份）"
+        else
+            [ -f "${BIN}" ] && cp "${BIN}" "${BIN}.bak-${TS}"
+            mv "${NEWBIN}" "${BIN}"
+            chmod 0755 "${BIN}"
+            echo "✓ ${BIN} （$(ls -lh "${BIN}" | awk '{print $5}')，$(uname -m)）"
+        fi
     else
+        rm -f "${NEWBIN}"
         echo "✗ 编译失败 —— 旧二进制仍在原位，statusline 不受影响"
         echo; echo "===== SCRIPT END ====="; exit 1
     fi
