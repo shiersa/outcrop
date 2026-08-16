@@ -50,10 +50,17 @@ TMUX_CONF="${HOME}/.tmux.conf"
 BEGIN_MARK="# ===== outcrop BEGIN (managed by outcrop/tmux/setup.sh) ====="
 END_MARK="# ===== outcrop END ====="
 
+# 图标必须是「有笔画」的字符。曾经 busy/wait/done 三个是空串，格式串里只剩
+# 一个带颜色的空格 —— 而空格没有笔画，只设前景色等于没设，于是 busy 和 done
+# 在标签栏上完全不可见，跟 idle 分不出来。只有 wait 因为设了背景色才看得见
+# （一个红块）。三个状态里两个白做。
+#
+# 用标准区符号而不是 Nerd Font 私有区：私有区字形在没装补丁字体的终端上是
+# 豆腐块，比空白更糟。●✓· 这几个几乎所有字体都有。
 if [ "${ASCII}" -eq 1 ]; then
     I_BUSY='*'; I_WAIT='!'; I_DONE='+'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'
 else
-    I_BUSY=''; I_WAIT=''; I_DONE=''; I_IDLE='󰧟'; I_WIDLE=''; I_ELL='…'
+    I_BUSY='●'; I_WAIT='!'; I_DONE='✓'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'
 fi
 
 # wait 用白字红底：红色小图标在余光里太容易漏掉，而这是唯一不该错过的状态
@@ -175,7 +182,14 @@ if [ "${SUBSHELL}" -eq 1 ]; then
 else
     E="#{@claude_win_state}"
 fi
-WIN_ICON="#{?#{==:${E},busy},${C_BUSY}${I_BUSY} #[default],#{?#{==:${E},wait},${C_WAIT}${I_WAIT} #[default],#{?#{==:${E},done},${C_DONE}${I_DONE} #[default],${I_WIDLE}}}}"
+# 图标和窗口名之间只要一个空格。原主题多半以空格开头（" #I:#W "），
+# 那就不再补 —— 否则 "● " + " 1:outcrop" 会挤出两个空格。
+# 空格只加在有图标的分支里：idle 分支图标为空，补了会让那一格错位。
+case "${WSF}" in
+    ' '*) ICON_SEP='' ;;
+    *)    ICON_SEP=' ' ;;
+esac
+WIN_ICON="#{?#{==:${E},busy},${C_BUSY}${I_BUSY}${ICON_SEP}#[default],#{?#{==:${E},wait},${C_WAIT}${I_WAIT}${ICON_SEP}#[default],#{?#{==:${E},done},${C_DONE}${I_DONE}${ICON_SEP}#[default],${I_WIDLE}}}}"
 
 # --- 目录段：标签栏和 pane 边框各自显示自己在哪 ---------------------------
 #
