@@ -30,9 +30,9 @@ pane 边框上每块各显各的：
 标签栏上分屏的 tab 会带一个 `▥3`，单 pane 的什么都不显示 —— 单 pane 是常态，
 值得标出来的是「这里不止一块」：
 
-    ● 3:outcrop ▥3   4:shiersa-ontology-site ▥2   5:BrandPal
+    ● 3:outcrop [3]   4:shiersa-ontology-site [2]   5:BrandPal
 
-`--no-pane-count` 关掉。`--ascii` 下用 `|`。
+`--no-pane-count` 关掉。
 
 **pane 标题** 回答「这块在做什么」
 
@@ -244,6 +244,10 @@ ctx 决定你什么时候该 /compact，是唯一会逼你动手的数字；quot
   的 stdout 是管道不是 tty，所以只能自己打开 `/dev/tty` 走 TIOCGWINSZ。
   纯 stdlib，不起子进程（这东西每次重绘都跑，fork 一个 tput 不能接受）。
   拿不到就退回「不截断」。
+- **宽度有歧义的字符别用在需要精确对齐的地方。** `▥ ● ·` 都是 East Asian
+  **Ambiguous**：按 CJK 配置的终端里占 2 列，其他终端占 1 列，而 tmux 按 1 列
+  排版。`▥3` 后面紧跟数字、中间没空格，于是图标和数字挤到一起；`●` 后面有
+  空格所以只是略宽、看不出来。分屏块数改用纯 ASCII 的 `[n]`。
 - **算宽度时 `█░│` 是单宽，不是双宽。** 它们是 East Asian Ambiguous/Neutral。
   当成双宽的话，光是三个分隔符加两条进度条就虚高十几列，字段会被过早丢掉。
   真正双宽的只有 CJK 和全角形式。

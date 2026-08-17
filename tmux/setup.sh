@@ -70,9 +70,9 @@ END_MARK="# ===== outcrop END ====="
 # 都是「在问你」，而 ! 读作警告，和红底一样属于报错语义 —— 错的不是状态，
 # 是符号。ASCII 模式同样用 ?，它本来就是 ASCII。
 if [ "${ASCII}" -eq 1 ]; then
-    I_BUSY='*'; I_WAIT='?'; I_DONE='+'; I_HINT='~'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'; I_SPLIT='|'
+    I_BUSY='*'; I_WAIT='?'; I_DONE='+'; I_HINT='~'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'; I_SPLIT_L='['; I_SPLIT_R=']'
 else
-    I_BUSY='●'; I_WAIT='?'; I_DONE='✓'; I_HINT='~'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'; I_SPLIT='▥'
+    I_BUSY='●'; I_WAIT='?'; I_DONE='✓'; I_HINT='~'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'; I_SPLIT_L='['; I_SPLIT_R=']'
 fi
 
 # wait 用底色而不只是前景色：小图标在余光里太容易漏掉，而这是唯一不该错过
@@ -344,11 +344,14 @@ fi
 # --- 分屏块数 ------------------------------------------------------------
 # 只在真分屏（>=2）时显示。每个 tab 都挂个「1」是纯噪音 —— 单 pane 才是常态，
 # 值得标出来的是「这个 tab 里还藏着别的东西」。
-# ▥ 读作「竖切开的一块」，标准区单列宽，不依赖补丁字体。
+# 用纯 ASCII 方括号，不用 ▥ 之类的方块字形：那些是 East Asian *Ambiguous*
+# 宽度，在按 CJK 配置的终端里占 2 列而 tmux 按 1 列算，图标就和数字挤到
+# 一起。同一个坑 statusline 里的 █░│ 也踩过 —— 宽度有歧义的字符别用在
+# 需要精确对齐的地方。
 # 比较用 #{e|>=:}（数值）；#{>=:} 是字典序，窗口数上到两位就会判错。
 CNT_SEG=""
 if [ "${PANE_CNT}" -eq 1 ]; then
-    CNT_SEG="#{?#{e|>=:#{window_panes},2},${C_DIR}${I_SPLIT}#{window_panes}#[default] ,}"
+    CNT_SEG="#{?#{e|>=:#{window_panes},2},${C_DIR}${I_SPLIT_L}#{window_panes}${I_SPLIT_R}#[default] ,}"
 fi
 
 # 原主题的 window-status-format 不一定以空格结尾，不补的话会和后面的段粘在一起
