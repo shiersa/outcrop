@@ -12,6 +12,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -422,6 +423,20 @@ func loadJSON(path string, v interface{}) error {
 	return json.Unmarshal(b, v)
 }
 
+// canonJSON 把 JSON 规范化后再比 —— 直接比原始字节的话，键序或空白
+// 变一下就会被当成「内容变了」。
+func canonJSON(b json.RawMessage) []byte {
+	var v interface{}
+	if json.Unmarshal(b, &v) != nil {
+		return b
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return b
+	}
+	return out
+}
+
 func saveJSON(path string, v interface{}) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -794,7 +809,7 @@ func (d displayConfig) layout() [][]string {
 		return d.Lines
 	}
 	if d.CacheHit != nil || d.BurnRate != nil || d.TokenBreakdown != nil {
-		row := []string{"model", "ctx", "quota", "cost", "tokens"}
+		row := []string{"model", "ctx", "quota", "tokens", "cost"}
 		if on(d.CacheHit, true) {
 			row = append(row, "cache")
 		}
@@ -1100,7 +1115,11 @@ var widgets = map[string]func(widgetCtx) string{
 			}
 			return cRed + "no usage" + cReset
 		}
-		return cBlue + humanTok(c.t.total()) + " tok" + cReset
+		// 用 billable 不用 total：cache_read 常占九成以上，把它算进来
+		// 会显示成 257M，看着像烧了两亿五，实际新产生的内容只有 5.3M。
+		// 同一个理由 burn rate 早就照办了，这里之前漏了。
+		// 完整四项在 breakdown widget 里，缓存占比看 cache widget。
+		return cBlue + humanTok(c.t.billable()) + " tok" + cReset
 	},
 
 	"cost": func(c widgetCtx) string {
@@ -1248,8 +1267,9 @@ var widgets = map[string]func(widgetCtx) string{
 // model 第一 —— 它是身份锚点，不看数字也得先知道自己在跟谁说话。
 // ctx 第二 —— 决定你什么时候该 /compact，是唯一会逼你动手的数字。
 // quota 第三 —— 5h/周额度，决定你还能不能继续。
-// 其余（花了多少、跑多快、缓存命中）是事后回看的，靠右。
-var defaultLine = []string{"model", "ctx", "quota", "cost", "tokens", "cache", "burn"}
+// tokens 排在 cost 前面 —— 用量是你能直接控制的，钱只是它乘上单价的结果，
+// 而且换 provider 时钱还可能压根估不准。
+var defaultLine = []string{"model", "ctx", "quota", "tokens", "cost", "cache", "burn"}
 
 func renderGLMQuota() string {
 	cfg := loadGLMConfig()
@@ -2255,7 +2275,22 @@ func cmdSyncPricing(args []string) {
 		}
 	}
 
-	changed := len(updated) > 0 || len(addSet) > 0
+	// 判「变了没」必须比对最终结果，不能看 updated 的条数 —— 那记的是
+	// 「上游匹配到了」，单价一个子儿没动也算数。这东西挂在 launchd 上每周
+	// 跑一次，按 updated 判的话会无声攒出一堆内容相同的 .bak。
+	// （register.py 当年就是栽在同一个坑上。）
+	changed := false
+	if len(newModels) != len(models) {
+		changed = true
+	} else {
+		for k, v := range newModels {
+			old, ok := models[k]
+			if !ok || !bytes.Equal(canonJSON(old), canonJSON(v)) {
+				changed = true
+				break
+			}
+		}
+	}
 	switch {
 	case dryRun:
 		fmt.Println("\n（--dry-run，未写入）")

@@ -36,13 +36,26 @@ ARGS="--binary '${BIN}' --state '${HOOK_DIR}/state.sh' --win '${HOOK_DIR}/win-st
 eval "python3 '${ROOT}/scripts/register.py' ${ARGS}" || echo "   ✗ 清理失败"
 echo
 
-echo "===== 3. hook 脚本 ====="
+echo "===== 3. 单价同步 LaunchAgent ====="
+echo
+SYNC_LABEL="com.outcrop.pricing-sync"
+PLIST="${HOME}/Library/LaunchAgents/${SYNC_LABEL}.plist"
+if [ -f "${PLIST}" ]; then
+    run "launchctl bootout 'gui/$(id -u)/${SYNC_LABEL}' 2>/dev/null || true"
+    run "rm -f '${PLIST}'"
+    echo "✓ 已卸载"
+else
+    echo "-  未安装"
+fi
+echo
+
+echo "===== 4. hook 脚本 ====="
 echo
 run "rm -f '${HOOK_DIR}/state.sh' '${HOOK_DIR}/win-state.sh'"
 echo "✓ 已移除"
 echo
 
-echo "===== 4. 保留的东西 ====="
+echo "===== 5. 保留的东西 ====="
 echo
 cat <<EOF
    以下没有删除，需要的话自己清理：

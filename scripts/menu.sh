@@ -31,10 +31,11 @@ MENU_ITEMS=(
     "行为|head|||怎么提醒你|||"
     "行为|bool|NOTIFY|需要你介入时发系统通知|这是唯一不该错过的状态|||"
     "行为|num|DONE_TTL|done 褪色秒数|跑完的绿色多久褪成灰，0 = 不褪|0|1800|300"
+    "行为|bool|SYNC_PRICING|每周同步第三方单价|DeepSeek 这类调价频繁，从 LiteLLM 拉，装个 LaunchAgent|||"
 )
 
 TMUX_ON=1; DIR_ON=1; TAB_DIR=0; TITLE_ON=1; ASCII=0
-DIR_MAX=28; TITLE_MAX=40; NOTIFY=1; DONE_TTL=900
+DIR_MAX=28; TITLE_MAX=40; NOTIFY=1; DONE_TTL=900; SYNC_PRICING=0
 
 MENU_FLAGS=""
 
@@ -58,6 +59,7 @@ menu_build_flags() {
     [ "${TITLE_MAX}" -ne 40 ] && MENU_FLAGS="${MENU_FLAGS} --title-max ${TITLE_MAX}"
     [ "${NOTIFY}" -eq 0 ]   && MENU_FLAGS="${MENU_FLAGS} --no-notify"
     [ "${DONE_TTL}" -ne 900 ] && MENU_FLAGS="${MENU_FLAGS} --done-ttl ${DONE_TTL}"
+    [ "${SYNC_PRICING}" -eq 1 ] && MENU_FLAGS="${MENU_FLAGS} --pricing-sync"
     MENU_FLAGS="${MENU_FLAGS# }"
 }
 

@@ -100,6 +100,7 @@ pane 宽度可以手动拖，**tmux 没有下限，能拖到 1 列**。所以最
     ./install.sh --dir-max 12   目录段最多占几列，超出保末尾截断（默认 28）
     ./install.sh --no-title     pane 边框仍显示进程名，不显示你输入的内容
     ./install.sh --title-max 24 标题最多占几列（默认 40）
+    ./install.sh --pricing-sync 装个 LaunchAgent，每周从 LiteLLM 同步第三方单价
 
 `--dir-max` 截断**保末尾不保开头**（`…roject-name-that-exceeds-cap`）——
 这套缩写的前提就是「末级留全名，那才是你要认的名字」，从右边砍掉的恰恰是它。
@@ -196,9 +197,14 @@ wait 用底色不用前景色，是因为小图标在余光里太容易漏掉，
 没数据的 widget 整段跳过，不显示占位符。改配置不需要重新编译。
 
 **顺序即优先级**：终端窄了从右边开始丢，所以最该看的放最左。默认顺序是
-`model` `ctx` `quota` `cost` `tokens` `cache` `burn` —— model 是身份锚点；
+`model` `ctx` `quota` `tokens` `cost` `cache` `burn` —— model 是身份锚点；
 ctx 决定你什么时候该 /compact，是唯一会逼你动手的数字；quota 决定你还能
-不能继续。花了多少、跑多快这些是事后回看的，靠右。
+不能继续；tokens 排在 cost 前面 —— 用量是你能直接控制的，钱只是它乘上单价的
+结果，换 provider 时还可能压根估不准。
+
+`tokens` 数的是 in + out + cache_write，**不含 cache_read**。缓存读常占九成
+以上，算进来会显示成 257M，看着像烧了两亿五，实际新产生的内容只有 5.3M。
+完整四项看 `breakdown`，缓存占比看 `cache`。
 
     200 列  Opus 5 (1M context) │ ctx ███░░ 58% 1M │ 5h █░░░░ 25% │ wk ░░░░░ 8% │ $88.946 │ 235.6M tok │ cache 98% │ 31.4K/min
      96 列  Opus 5 (1M context) │ ctx ███░░ 58% 1M │ 5h █░░░░ 25% │ wk ░░░░░ 8% │ $88.946 │ 235.6M tok
@@ -226,6 +232,10 @@ ctx 决定你什么时候该 /compact，是唯一会逼你动手的数字；quot
 - **算宽度时 `█░│` 是单宽，不是双宽。** 它们是 East Asian Ambiguous/Neutral。
   当成双宽的话，光是三个分隔符加两条进度条就虚高十几列，字段会被过早丢掉。
   真正双宽的只有 CJK 和全角形式。
+- **「变了没」只能靠比对最终结果。** `--sync-pricing` 曾按「上游匹配到几条」
+  判断，单价一个子儿没动也算变，于是每周一次的 launchd 任务会无声攒出一堆
+  内容相同的 `.bak`。同一个坑 `register.py` 和 `tmux/setup.sh` 都栽过 ——
+  凡是「先清空再重建」的写法，过程量都不能拿来当变更依据。
 - **字段名差一个后缀就全盘失效。** `rate_limits.five_hour.used_percentage`
   曾经被写成找 `used_pct` / `used_percent`，于是额度一直显示 `quota n/a` ——
   数据一直都在。这类「猜字段名」的地方一定要用 `--dump-input` 对一遍实际输入。

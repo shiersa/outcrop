@@ -18,6 +18,7 @@
 #   ./install.sh --no-title         pane 边框仍显示进程名，不显示你输入的内容
 #   ./install.sh --title-max 24     标题最多占几列（默认 40）
 #   ./install.sh --yes              跳过交互菜单，直接按默认装
+#   ./install.sh --pricing-sync     装一个每周同步单价的 LaunchAgent
 #
 # 不带任何配置开关、且在终端里运行时，会先弹一个勾选菜单。
 #
@@ -28,7 +29,7 @@ echo
 
 DRY_RUN=0; ASCII=0; SUBSHELL=0; NO_TMUX=0; NOTIFY=1; DONE_TTL=900
 NO_DIR=0; TAB_DIR=0; DIR_MAX=28; DIR_FULL=0; NO_TITLE=0; TITLE_MAX=40
-NO_MENU=0
+NO_MENU=0; PRICING_SYNC=0
 
 # 记下哪些是用户显式写的 —— 写了开关就说明他知道自己要什么，别再弹菜单打断
 CONFIG_ARGS=0
@@ -54,7 +55,8 @@ while [ $# -gt 0 ]; do
         --no-title)  NO_TITLE=1 ;;
         --title-max) shift; TITLE_MAX="${1:-40}" ;;
         --no-menu|--yes|-y) NO_MENU=1 ;;
-        -h|--help)   sed -n '2,22p' "$0"; echo "===== SCRIPT END ====="; exit 0 ;;
+        --pricing-sync)     PRICING_SYNC=1 ;;
+        -h|--help)   sed -n '2,23p' "$0"; echo "===== SCRIPT END ====="; exit 0 ;;
         *)           echo "⚠️  未知参数: $1 （已忽略）" ;;
     esac
     shift
@@ -69,6 +71,7 @@ if [ "${NO_MENU}" -eq 0 ] && [ "${CONFIG_ARGS}" -eq 0 ] && [ -f "${MENU_SH}" ]; 
     if menu_supported; then
         if menu_run; then
             NO_TMUX=$((1 - TMUX_ON)); NO_DIR=$((1 - DIR_ON)); NO_TITLE=$((1 - TITLE_ON))
+            PRICING_SYNC="${SYNC_PRICING}"
             echo
             echo "   已选: ./install.sh ${MENU_FLAGS:-（全部默认）}"
             echo
@@ -98,6 +101,7 @@ HOOK_DIR="${HOME}/.config/claude-tmux"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-tmux"
 BIN="${SL_DIR}/claude-statusline"
 TOOLS_DIR="${HOOK_DIR}/tools"
+SYNC_LABEL="com.outcrop.pricing-sync"
 
 # 两用：包根目录有可执行的 claude-statusline 就是发布包（直接 cp），否则现场编译。
 PREBUILT=0
@@ -264,6 +268,50 @@ else
     [ "${NO_TITLE}" -eq 1 ] && TARGS="${TARGS} --no-title"
     TARGS="${TARGS} --dir-max ${DIR_MAX} --title-max ${TITLE_MAX}"
     bash "${ROOT}/tmux/setup.sh" ${TARGS}
+fi
+echo
+
+# 单价定期同步。第三方 provider（DeepSeek 之类）调价频繁，手填不现实；
+# LiteLLM 那份社区价目表是实时的，让 launchd 每周拉一次就行。
+# 不放进 statusline 的渲染路径 —— 那东西每次重绘都跑，不能带网络请求。
+echo "===== 6b. 单价定期同步 ====="
+echo
+PLIST="${HOME}/Library/LaunchAgents/${SYNC_LABEL}.plist"
+if [ "${PRICING_SYNC}" -eq 1 ]; then
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        echo "   [dry-run] 写入 ${PLIST} 并加载"
+    else
+        mkdir -p "${HOME}/Library/LaunchAgents"
+        cat > "${PLIST}" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${SYNC_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${BIN}</string>
+    <string>--sync-pricing</string>
+  </array>
+  <!-- StartInterval 而不是 StartCalendarInterval：笔记本经常睡着，
+       按日历排的任务错过就直接跳过，按间隔排的会在唤醒后补跑。 -->
+  <key>StartInterval</key><integer>604800</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>${SL_DIR}/cache/sync-pricing.log</string>
+  <key>StandardErrorPath</key><string>${SL_DIR}/cache/sync-pricing.log</string>
+</dict>
+</plist>
+PLIST_EOF
+        launchctl bootout "gui/$(id -u)/${SYNC_LABEL}" 2>/dev/null || true
+        if launchctl bootstrap "gui/$(id -u)" "${PLIST}" 2>/dev/null; then
+            echo "✓ ${PLIST}"
+            echo "   每 7 天从 LiteLLM 同步一次单价，日志在 ${SL_DIR}/cache/sync-pricing.log"
+        else
+            echo "⚠️  plist 已写入但加载失败，手动: launchctl bootstrap gui/$(id -u) ${PLIST}"
+        fi
+    fi
+else
+    echo "-  未启用（--pricing-sync 开启；只对 DeepSeek/OpenAI 这类需要估价的 provider 有意义）"
 fi
 echo
 

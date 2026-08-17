@@ -244,6 +244,26 @@ print(t)' 2>/dev/null || echo 0)"
 fi
 echo
 
+echo "===== 4b. 单价定期同步 ====="
+echo
+SYNC_LABEL="com.outcrop.pricing-sync"
+PLIST="${HOME}/Library/LaunchAgents/${SYNC_LABEL}.plist"
+if [ -f "${PLIST}" ]; then
+    if launchctl list 2>/dev/null | grep -q "${SYNC_LABEL}"; then
+        ok "LaunchAgent 已加载（每 7 天同步一次单价）"
+    else
+        warn "plist 存在但未加载: launchctl bootstrap gui/$(id -u) ${PLIST}"
+    fi
+    LOG="${SL_DIR}/cache/sync-pricing.log"
+    if [ -f "${LOG}" ]; then
+        ok "  最近一次: $(date -r "${LOG}" '+%Y-%m-%d %H:%M')"
+        grep -q '\u2717\|失败\|error' "${LOG}" 2>/dev/null && warn "  日志里有报错，看 ${LOG}"
+    fi
+else
+    warn "未装单价同步（--pricing-sync 开启；Anthropic 用原生额度，用不到）"
+fi
+echo
+
 echo "===== 5. 配置文件 ====="
 echo
 for c in pricing.json context_windows.json display.json glm.json; do
