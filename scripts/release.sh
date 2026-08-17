@@ -134,6 +134,15 @@ echo "===== 打包 ====="
 echo
 DIST="${ROOT}/dist"
 mkdir -p "${DIST}"
+
+# 先清掉上一版的产物。不清的话 dist/ 会跨版本堆积，发 Release 时
+# `gh release create v1.1.0 dist/*` 会把 v1.0.0 的包一并传上去。
+# 只删本脚本自己按固定命名产出的那几类，不是 dist/* 一把梭 ——
+# 范围确定，也就不需要谁来替你判断这次删除安不安全。
+rm -f "${DIST}"/outcrop-*-darwin-*.tar.gz \
+      "${DIST}"/outcrop-*-darwin-*.tar.gz.sha256 \
+      "${DIST}"/outcrop-*-darwin-*.sh \
+      "${DIST}"/outcrop-*-darwin-*.sh.sha256
 ARCHIVE_NAME="outcrop-${VERSION}-darwin-${ARCH_TAG}.tar.gz"
 ARCHIVE="${DIST}/${ARCHIVE_NAME}"
 
