@@ -794,7 +794,7 @@ func (d displayConfig) layout() [][]string {
 		return d.Lines
 	}
 	if d.CacheHit != nil || d.BurnRate != nil || d.TokenBreakdown != nil {
-		row := []string{"ctx", "quota", "cost", "model", "tokens"}
+		row := []string{"model", "ctx", "quota", "cost", "tokens"}
 		if on(d.CacheHit, true) {
 			row = append(row, "cache")
 		}
@@ -1245,10 +1245,11 @@ var widgets = map[string]func(widgetCtx) string{
 
 // 单行时的默认顺序。多行由 display.json 的 lines 决定。
 // 顺序即优先级：窄了从右边开始丢，所以最该看的放最左。
-// ctx 第一 —— 它决定你什么时候该 /compact，是唯一会逼你动手的数字。
-// quota 第二 —— 5h/周额度，决定你还能不能继续。
+// model 第一 —— 它是身份锚点，不看数字也得先知道自己在跟谁说话。
+// ctx 第二 —— 决定你什么时候该 /compact，是唯一会逼你动手的数字。
+// quota 第三 —— 5h/周额度，决定你还能不能继续。
 // 其余（花了多少、跑多快、缓存命中）是事后回看的，靠右。
-var defaultLine = []string{"ctx", "quota", "cost", "model", "tokens", "cache", "burn"}
+var defaultLine = []string{"model", "ctx", "quota", "cost", "tokens", "cache", "burn"}
 
 func renderGLMQuota() string {
 	cfg := loadGLMConfig()

@@ -196,9 +196,15 @@ wait 用底色不用前景色，是因为小图标在余光里太容易漏掉，
 没数据的 widget 整段跳过，不显示占位符。改配置不需要重新编译。
 
 **顺序即优先级**：终端窄了从右边开始丢，所以最该看的放最左。默认顺序是
-`ctx` `quota` `cost` `model` `tokens` `cache` `burn` —— ctx 决定你什么时候
-该 /compact，是唯一会逼你动手的数字；quota 决定你还能不能继续。花了多少、
-跑多快这些是事后回看的，靠右。
+`model` `ctx` `quota` `cost` `tokens` `cache` `burn` —— model 是身份锚点；
+ctx 决定你什么时候该 /compact，是唯一会逼你动手的数字；quota 决定你还能
+不能继续。花了多少、跑多快这些是事后回看的，靠右。
+
+    200 列  Opus 5 (1M context) │ ctx ███░░ 58% 1M │ 5h █░░░░ 25% │ wk ░░░░░ 8% │ $88.946 │ 235.6M tok │ cache 98% │ 31.4K/min
+     96 列  Opus 5 (1M context) │ ctx ███░░ 58% 1M │ 5h █░░░░ 25% │ wk ░░░░░ 8% │ $88.946 │ 235.6M tok
+     70 列  Opus 5 (1M context) │ ctx ███░░ 58% 1M │ 5h █░░░░ 25% │ wk ░░░░░ 8%
+     50 列  Opus 5 (1M context) │ ctx ███░░ 58% 1M
+     30 列  Opus 5 (1M context)
 
 ## 子命令
 
