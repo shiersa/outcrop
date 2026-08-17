@@ -456,6 +456,31 @@ func saveJSON(path string, v interface{}) error {
 // provider 路由
 // ---------------------------------------------------------------------------
 
+// isPrivateHost 认 RFC1918 内网段和常见的内部域名后缀。
+// 宁可误判成自部署：代价是少显示一个金额，而反过来（把自部署当成付费
+// provider）会打出「价格未填」，叫你去填一个不存在的单价。
+func isPrivateHost(base string) bool {
+	for _, p := range []string{
+		"//10.", "//192.168.", "//169.254.",
+		"//172.16.", "//172.17.", "//172.18.", "//172.19.",
+		"//172.20.", "//172.21.", "//172.22.", "//172.23.",
+		"//172.24.", "//172.25.", "//172.26.", "//172.27.",
+		"//172.28.", "//172.29.", "//172.30.", "//172.31.",
+	} {
+		if strings.Contains(base, p) {
+			return true
+		}
+	}
+	for _, suf := range []string{".internal", ".local", ".lan", ".intranet", ".home.arpa"} {
+		// 三种收尾都要认：.lan/  .lan:8000  以及直接结尾
+		if strings.Contains(base, suf+"/") || strings.Contains(base, suf+":") ||
+			strings.HasSuffix(base, suf) {
+			return true
+		}
+	}
+	return false
+}
+
 func detectProvider() (string, string) {
 	base := strings.ToLower(os.Getenv("ANTHROPIC_BASE_URL"))
 	switch {
@@ -467,7 +492,11 @@ func detectProvider() (string, string) {
 	case strings.Contains(base, "deepseek"):
 		return "deepseek", base
 	case strings.Contains(base, "127.0.0.1"), strings.Contains(base, "localhost"),
-		strings.Contains(base, "0.0.0.0"), strings.Contains(base, "[::1]"):
+		strings.Contains(base, "0.0.0.0"), strings.Contains(base, "[::1]"),
+		isPrivateHost(base):
+		// 自部署不止跑在 localhost：常见的是内网另一台机器，或公司内部域名。
+		// 认不出来就会走「generic」去查价目表，然后报「价格未填」——
+		// 而自部署根本没有单价，那个提示是在让你去填一个不存在的东西。
 		return "local", base
 	case strings.Contains(base, "openai"):
 		return "openai", base
@@ -1202,6 +1231,14 @@ var widgets = map[string]func(widgetCtx) string{
 		mark := ""
 		if src == "guess" {
 			mark = "?"
+		}
+		// 超过 100% 说明分母是错的（原生路径有 p<=100 的守卫，猜测路径没有）。
+		// 自部署模型最容易撞上：Claude Code 不给 context_window，就按默认
+		// 200K 猜，实际窗口更大时会打出「332%」这种自信的假数字，进度条
+		// 早就满了。这时百分比没有意义，改报绝对量 —— 那才是真信息。
+		// 想要百分比就把窗口大小填进 context_windows.json。
+		if p > 100 {
+			return cDim + "ctx " + humanTok(c.t.Ctx) + mark + cReset
 		}
 		return fmt.Sprintf("%sctx %s %.0f%%%s %s%s%s%s",
 			pctColor(p), bar(p, 5), p, cReset, cDim, fmtLimit(limit), mark, cReset)
