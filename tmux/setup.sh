@@ -367,6 +367,16 @@ WSCF="$(append_seg "${WSCF}" "${DIR_SEG}")"
 WSF="$(append_seg "${WSF}" "${CNT_SEG}")"
 WSCF="$(append_seg "${WSCF}" "${CNT_SEG}")"
 
+# tab 之间再加一个空格，让「组间距」大于「组内距」。
+# 图标是 tab 的前缀，但原来左右各 1 个空格、完全等距 ——
+#   2:assay ● 3:outcrop
+#           ↑ 读作谁的状态都行
+# 按接近性原则把组间拉开就消歧了。不动图标那侧的间距，因为 ● 是
+# Ambiguous 宽度，贴着数字会撞（[n] 那次已经栽过）。
+# 代价是每个 tab 多占 1 列 —— 目录段撤出标签栏后宽度很宽裕。
+WSF="${WSF} "
+WSCF="${WSCF} "
+
 if [ "${DRY_RUN}" -eq 1 ]; then
     echo "   [dry-run] 会写入 managed block"
     exit 0
