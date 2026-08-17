@@ -1044,6 +1044,13 @@ func toFloat(v interface{}) (float64, bool) {
 	return 0, false
 }
 
+// normPct 只该用在**名字本身没说清单位**的字段上（utilization 这种）。
+// 名字里带 percent/pct/percentage 的一律照单全收 —— 猜错的代价是 100 倍：
+// Claude Code 给的 used_percentage=1 表示 1%，被当成小数比例乘 100 就成了
+// 100%，进度条直接爆红，而实际只用了 1%。
+//
+// 「<=1 就是小数比例」这个启发式无论阈值定在哪都会错：0.5 既可能是 0.5%
+// 也可能是 50%。唯一可靠的依据是字段名，所以别再对已知语义的字段用它。
 func normPct(p float64) float64 {
 	if p <= 1.0 {
 		return p * 100
@@ -1099,16 +1106,22 @@ func renderRateLimits(raw json.RawMessage) string {
 		if node == nil {
 			continue
 		}
-		p, ok := dig(node, "used_percentage", "used_pct", "utilization", "percent_used", "used_percent")
+		// 名字里写明是百分比的，直接用，不做任何换算
+		p, ok := dig(node, "used_percentage", "used_pct", "percent_used", "used_percent")
+		if !ok {
+			// utilization 没说单位，可能是 0~1 —— 只有它才用启发式
+			if u, uok := dig(node, "utilization"); uok {
+				p, ok = normPct(u), true
+			}
+		}
 		if !ok {
 			used, ok1 := dig(node, "used", "used_tokens")
 			lim, ok2 := dig(node, "limit", "total", "max")
 			if !ok1 || !ok2 || lim == 0 {
 				continue
 			}
-			p = used / lim * 100
+			p = used / lim * 100 // 算出来的本来就是百分比
 		}
-		p = normPct(p)
 		segs = append(segs, fmt.Sprintf("%s%s %s %.0f%%%s",
 			pctColor(p), pair.label, bar(p, 5), p, cReset))
 	}
@@ -1355,13 +1368,13 @@ func renderGLMQuota() string {
 		}
 	}
 	if pok {
-		p = normPct(p)
+		// 不做换算：算出来的 used/total*100 本来就是百分比，
+		// glm.json 映射的 used_pct 上游给的也是 percentage（0~100）
 		segs = append(segs, fmt.Sprintf("%s5h %s %.0f%%%s", pctColor(p), bar(p, 5), p, cReset))
 	} else {
 		segs = append(segs, cRed+"字段未匹配"+cReset)
 	}
 	if p, ok := dig(q, ep.Fields["mcp_pct"]...); ok {
-		p = normPct(p)
 		segs = append(segs, fmt.Sprintf("%sMCP %.0f%%%s", pctColor(p), p, cReset))
 	}
 	if age > 3*quotaTTL {
