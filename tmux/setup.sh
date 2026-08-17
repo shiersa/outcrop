@@ -12,7 +12,7 @@
 #      重复运行还要能识别"已经包过一层"，不然会套娃。
 #
 # 用法: setup.sh [--ascii] [--subshell] [--no-dir] [--tab-dir] [--dir-max N]
-#                [--dir-full] [--no-title] [--title-max N]
+#                [--dir-full] [--no-title] [--title-max N] [--no-pane-count]
 #                [--dry-run] [--uninstall]
 #
 set -uo pipefail
@@ -21,7 +21,7 @@ set -uo pipefail
 # 一个 tab 分了屏，它就只代表其中一块，却看着像整个 tab 的目录 —— 是误导。
 # pane 边框上每块各显各的，那里才是目录该待的地方。
 DRY_RUN=0; ASCII=0; SUBSHELL=0; UNINSTALL=0; DIR=1; DIR_MAX=28; DIR_FULLMODE=0
-TAB_DIR=0
+TAB_DIR=0; PANE_CNT=1
 TITLE=1; TITLE_MAX=40
 while [ $# -gt 0 ]; do
     case "${1}" in
@@ -29,6 +29,7 @@ while [ $# -gt 0 ]; do
         --subshell)  SUBSHELL=1 ;;
         --no-dir)    DIR=0 ;;
         --tab-dir)   TAB_DIR=1 ;;
+        --no-pane-count) PANE_CNT=0 ;;
         --dir-max)   shift; DIR_MAX="${1:-28}" ;;
         --dir-full)  DIR_FULLMODE=1 ;;
         --no-title)  TITLE=0 ;;
@@ -69,9 +70,9 @@ END_MARK="# ===== outcrop END ====="
 # 都是「在问你」，而 ! 读作警告，和红底一样属于报错语义 —— 错的不是状态，
 # 是符号。ASCII 模式同样用 ?，它本来就是 ASCII。
 if [ "${ASCII}" -eq 1 ]; then
-    I_BUSY='*'; I_WAIT='?'; I_DONE='+'; I_HINT='~'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'
+    I_BUSY='*'; I_WAIT='?'; I_DONE='+'; I_HINT='~'; I_IDLE='-'; I_WIDLE=''; I_ELL='~'; I_SPLIT='|'
 else
-    I_BUSY='●'; I_WAIT='?'; I_DONE='✓'; I_HINT='~'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'
+    I_BUSY='●'; I_WAIT='?'; I_DONE='✓'; I_HINT='~'; I_IDLE='·'; I_WIDLE=''; I_ELL='…'; I_SPLIT='▥'
 fi
 
 # wait 用底色而不只是前景色：小图标在余光里太容易漏掉，而这是唯一不该错过
@@ -340,16 +341,28 @@ else
     PANE_FMT="${PANE_FMT}${PB_CMD}"
 fi
 
-# 原主题的 window-status-format 不一定以空格结尾，不补的话会和目录粘在一起
-append_dir() {
-    [ -z "${DIR_SEG}" ] && { printf '%s' "$1"; return; }
+# --- 分屏块数 ------------------------------------------------------------
+# 只在真分屏（>=2）时显示。每个 tab 都挂个「1」是纯噪音 —— 单 pane 才是常态，
+# 值得标出来的是「这个 tab 里还藏着别的东西」。
+# ▥ 读作「竖切开的一块」，标准区单列宽，不依赖补丁字体。
+# 比较用 #{e|>=:}（数值）；#{>=:} 是字典序，窗口数上到两位就会判错。
+CNT_SEG=""
+if [ "${PANE_CNT}" -eq 1 ]; then
+    CNT_SEG="#{?#{e|>=:#{window_panes},2},${C_DIR}${I_SPLIT}#{window_panes}#[default] ,}"
+fi
+
+# 原主题的 window-status-format 不一定以空格结尾，不补的话会和后面的段粘在一起
+append_seg() {
+    [ -z "$2" ] && { printf '%s' "$1"; return; }
     case "$1" in
-        *' ') printf '%s%s' "$1" "${DIR_SEG}" ;;
-        *)    printf '%s %s' "$1" "${DIR_SEG}" ;;
+        *' ') printf '%s%s' "$1" "$2" ;;
+        *)    printf '%s %s' "$1" "$2" ;;
     esac
 }
-WSF="$(append_dir "${WSF}")"
-WSCF="$(append_dir "${WSCF}")"
+WSF="$(append_seg "${WSF}" "${DIR_SEG}")"
+WSCF="$(append_seg "${WSCF}" "${DIR_SEG}")"
+WSF="$(append_seg "${WSF}" "${CNT_SEG}")"
+WSCF="$(append_seg "${WSCF}" "${CNT_SEG}")"
 
 if [ "${DRY_RUN}" -eq 1 ]; then
     echo "   [dry-run] 会写入 managed block"

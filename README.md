@@ -25,6 +25,15 @@ pane 边框上每块各显各的：
 是误导。`--tab-dir` 可以开回来（这时才有「末级与窗口名重复就只显示父路径」
 那套逻辑，`--dir-full` 关掉它）。
 
+**分屏块数** 回答「这个 tab 里还藏着别的东西吗」
+
+标签栏上分屏的 tab 会带一个 `▥3`，单 pane 的什么都不显示 —— 单 pane 是常态，
+值得标出来的是「这里不止一块」：
+
+    ● 3:outcrop ▥3   4:shiersa-ontology-site ▥2   5:BrandPal
+
+`--no-pane-count` 关掉。`--ascii` 下用 `|`。
+
 **pane 标题** 回答「这块在做什么」
 
 边框上那个 `zsh` 是 `pane_current_command`，对 Claude Code 毫无信息量 ——
@@ -101,6 +110,7 @@ pane 宽度可以手动拖，**tmux 没有下限，能拖到 1 列**。所以最
     ./install.sh --done-ttl 0   done 状态不自动褪色
     ./install.sh --no-dir       pane 边框也不显示目录段
     ./install.sh --tab-dir      标签栏也显示目录（多 pane 时只代表当前那块）
+    ./install.sh --no-pane-count 标签栏不显示分屏块数
     ./install.sh --dir-full     标签栏总是显示完整路径，不省略重复的末级
     ./install.sh --dir-max 12   目录段最多占几列，超出保末尾截断（默认 28）
     ./install.sh --no-title     pane 边框仍显示进程名，不显示你输入的内容
