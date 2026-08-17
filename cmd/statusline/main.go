@@ -1026,6 +1026,24 @@ func normPct(p float64) float64 {
 // Anthropic 原生 rate_limits
 // ---------------------------------------------------------------------------
 
+// isSubscription：有 5h / 周滚动窗口配额就是订阅制。按量付费的 API key
+// 走的是每分钟 token/请求限流，不会给这两个窗口。
+func isSubscription(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	for _, k := range []string{"five_hour", "session", "primary", "seven_day", "weekly"} {
+		if _, ok := m[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func renderRateLimits(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -1123,7 +1141,16 @@ var widgets = map[string]func(widgetCtx) string{
 	},
 
 	"cost": func(c widgetCtx) string {
-		// 优先用 Claude Code 自己算的花费 —— 它知道真实计费，比我们的价格表可信
+		// 订阅制下这个数字不是你被扣的钱。有 5h / 周滚动窗口配额就说明是
+		// 订阅（按量付费的 API key 是另一套限流模型，不给这两个窗口），
+		// 这时 total_cost_usd 的含义是「同样的量走按量付费 API 会花多少」——
+		// 折合价，不是开销。而它渲染成光秃秃的 $88.946，没有任何标记，
+		// 看着就像真实账单。与其展示一个会被误读的数，不如不展示。
+		if isSubscription(c.in.RateLimits) {
+			return ""
+		}
+		// 按量付费：优先用 Claude Code 自己算的花费 —— 它知道真实计费，
+		// 比我们的价格表可信
 		if v, ok := digRaw(c.raw, "total_cost_usd"); ok {
 			if f, ok := toFloat(v); ok && f > 0 {
 				return cYellow + fmt.Sprintf("$%.3f", f) + cReset

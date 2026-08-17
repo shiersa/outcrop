@@ -78,7 +78,8 @@ pane 宽度可以手动拖，**tmux 没有下限，能拖到 1 列**。所以最
 
 | provider | 显示 |
 |---|---|
-| Anthropic | 原生 `rate_limits` 额度 |
+| Anthropic 订阅 | 原生 `rate_limits` 额度，**不显示金额** |
+| Anthropic 按量付费 | 原生 `total_cost_usd` 金额 |
 | 智谱 GLM | `glm.json` 配的额度接口 |
 | DeepSeek / OpenAI | token + `pricing.json` 估算金额 |
 | 本地模型 | 只有 token，无金额 |
@@ -232,6 +233,11 @@ ctx 决定你什么时候该 /compact，是唯一会逼你动手的数字；quot
 - **算宽度时 `█░│` 是单宽，不是双宽。** 它们是 East Asian Ambiguous/Neutral。
   当成双宽的话，光是三个分隔符加两条进度条就虚高十几列，字段会被过早丢掉。
   真正双宽的只有 CJK 和全角形式。
+- **订阅制下不显示金额。** `total_cost_usd` 在订阅制下的含义是「同样的量走
+  按量付费 API 会花多少」——折合价，不是你被扣的钱，而它渲染成光秃秃的
+  `$88.946`，看着就像真实账单。判据是 `rate_limits` 里有没有 5h / 周滚动
+  窗口：按量付费的 API key 走每分钟 token/请求限流，不给这两个窗口。
+  一个会被误读的数字，不如不展示。
 - **「变了没」只能靠比对最终结果。** `--sync-pricing` 曾按「上游匹配到几条」
   判断，单价一个子儿没动也算变，于是每周一次的 launchd 任务会无声攒出一堆
   内容相同的 `.bak`。同一个坑 `register.py` 和 `tmux/setup.sh` 都栽过 ——
