@@ -98,6 +98,8 @@ chmod 0755 "${PKGDIR}/${BIN_NAME}"
 cp "${ROOT}/install.sh"   "${PKGDIR}/install.sh"
 cp "${ROOT}/uninstall.sh" "${PKGDIR}/uninstall.sh"
 cp "${ROOT}/README.md"    "${PKGDIR}/README.md"
+# 分发出去的包必须带许可，否则拿到包的人不知道能不能用
+cp "${ROOT}/LICENSE"      "${PKGDIR}/LICENSE"
 
 cp -R "${ROOT}/hooks"   "${PKGDIR}/hooks"
 cp -R "${ROOT}/tmux"    "${PKGDIR}/tmux"
@@ -112,7 +114,7 @@ find "${PKGDIR}"/hooks "${PKGDIR}"/tmux "${PKGDIR}"/scripts -name '*.sh' \
 
 printf '%s\n' "${VERSION}" > "${PKGDIR}/VERSION"
 
-echo "✓ 二进制 + 脚本 + hooks/tmux/scripts + config/*.example + VERSION"
+echo "✓ 二进制 + 脚本 + hooks/tmux/scripts + config/*.example + LICENSE + VERSION"
 echo
 
 # 防御性核查：源码绝不进包。
