@@ -34,8 +34,10 @@ printf '%s %s' "$STATE" "$(date +%s)" > "$F" 2>/dev/null || true
 tmux set-option -p -t "$TMUX_PANE" @claude_state "$STATE" 2>/dev/null || true
 
 # --- pane 标题：把你输入的第一句存进 @claude_prompt -----------------------
-# busy 只由 UserPromptSubmit 触发（事件表见 scripts/register.py），所以这里
-# 读到的 stdin 一定是那个事件的 JSON，prompt 字段就是你敲的内容。
+# busy 有两个来源：UserPromptSubmit（你敲了东西）和 PostToolUse（你答完了
+# AskUserQuestion）。只有前者带 prompt 字段，所以下面必须按 hook_event_name
+# 分辨 —— 早先注释里写着「busy 只由 UserPromptSubmit 触发」，加了 PostToolUse
+# 之后就不成立了，结果每次答完选项都会往诊断文件里记一笔「没有 prompt 字段」。
 #
 # [ ! -t 0 ] 不能省：手动在终端里跑 state.sh busy 时 stdin 是 tty，
 # python 会一直等 EOF，把整个 hook 卡死。
@@ -46,6 +48,9 @@ import json, os, re, sys, unicodedata
 try:
     d = json.load(sys.stdin)
 except Exception:
+    sys.exit(0)
+# 不是 UserPromptSubmit 就没什么可取的，安静退出（别记诊断）
+if d.get("hook_event_name") not in ("", None, "UserPromptSubmit"):
     sys.exit(0)
 p = (d.get("prompt") or "").strip()
 if not p:

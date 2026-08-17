@@ -342,6 +342,10 @@ ctx 决定你什么时候该 /compact，是唯一会逼你动手的数字；quot
   tmux 自己算得对，不用额外处理。
 - **UserPromptSubmit 是阻塞 hook。** 你按回车到 Claude 开始跑之间会等它。
   实测这套 python 解析约 35ms，可以接受；再重就该换进 Go 二进制了。
+- **一个状态有多个入口时，payload 的形状也就不止一种。** `busy` 后来多了
+  `PostToolUse` 这个来源，而 hook 里还按「busy 只可能来自 UserPromptSubmit」
+  去取 `prompt` 字段 —— 于是每次答完选项都会往诊断文件里记一笔假报警。
+  必须按 `hook_event_name` 分辨。（这条是自己的诊断机制抓出来的。）
 - **拿不到就记下来，别静默退化。** hook 读不到 `prompt` 字段时，表现只是
   边框默默显示进程名，看不出是哪一环断的。所以把 payload 的字段名写进
   `last-hook-keys`，`doctor.sh` 会读出来告诉你实际字段叫什么。
