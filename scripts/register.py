@@ -10,6 +10,13 @@
   PreToolUse(AskUserQuestion|ExitPlanMode)  -> wait 选项询问 / 计划审批
   PostToolUse(AskUserQuestion|ExitPlanMode) -> busy 你答完了，我继续干
   PermissionRequest                     -> wait   权限请求
+  SessionStart                          -> init   只写 session 名，不碰状态
+
+SessionStart 那条不是状态，是给跨会话通信用的：它让 state.sh 把这个会话的
+name（~/.claude/sessions/<pid>.json 里的那个，也就是 @mention 的地址）写进
+pane 的 @claude_session，一开会话就有，不用等你先敲一句话。
+它刻意**不**映射成 idle —— /clear 和 resume 也会触发 SessionStart，而 idle 是
+能清除粘性 wait 的两个状态之一，那会把「真在等你决策」的信号悄悄抹掉。
 
 后两条是补上去的。最初只挂了 Notification，结果开着 bypass permissions 时
 计划审批完全没有信号 —— 窗口显示成绿色「已完成」，比没有状态更糟。
@@ -41,6 +48,7 @@ EVENTS = [
     ("PreToolUse", "AskUserQuestion|ExitPlanMode", "wait"),
     ("PostToolUse", "AskUserQuestion|ExitPlanMode", "busy"),
     ("PermissionRequest", "", "wait"),
+    ("SessionStart", "", "init"),
 ]
 
 

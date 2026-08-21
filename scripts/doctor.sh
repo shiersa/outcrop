@@ -61,7 +61,7 @@ python3 - <<'PYEOF'
 import json, os
 home = os.path.expanduser("~")
 need = {"UserPromptSubmit", "Stop", "SessionEnd", "Notification",
-        "PreToolUse", "PermissionRequest"}
+        "PreToolUse", "PermissionRequest", "SessionStart"}
 dirs = [os.path.join(home, n) for n in sorted(os.listdir(home))
         if (n == ".claude" or n.startswith(".claude-")) and os.path.isdir(os.path.join(home, n))]
 if not dirs:

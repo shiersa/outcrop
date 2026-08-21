@@ -13,6 +13,7 @@
 #
 # 用法: setup.sh [--ascii] [--subshell] [--no-dir] [--tab-dir] [--dir-max N]
 #                [--dir-full] [--no-title] [--title-max N] [--no-pane-count]
+#                [--no-session] [--session-max N]
 #                [--dry-run] [--uninstall]
 #
 set -uo pipefail
@@ -22,6 +23,10 @@ set -uo pipefail
 # pane 边框上每块各显各的，那里才是目录该待的地方。
 DRY_RUN=0; ASCII=0; SUBSHELL=0; UNINSTALL=0; DIR=1; DIR_MAX=28; DIR_FULLMODE=0
 TAB_DIR=0; PANE_CNT=1
+# 徽标显示的是**全名**（outcrop-c1），因为它独立成段、不再借路径供前半截 ——
+# 只显后缀就成了一个没法直接点名的 "c1"。16 列盖得住绝大多数
+# 「目录名-两位十六进制」，超了保末尾截断（见下面 SESS_PANE 的注释）。
+SESS=1; SESS_MAX=16
 TITLE=1; TITLE_MAX=40
 while [ $# -gt 0 ]; do
     case "${1}" in
@@ -30,6 +35,8 @@ while [ $# -gt 0 ]; do
         --no-dir)    DIR=0 ;;
         --tab-dir)   TAB_DIR=1 ;;
         --no-pane-count) PANE_CNT=0 ;;
+        --no-session) SESS=0 ;;
+        --session-max) shift; SESS_MAX="${1:-16}" ;;
         --dir-max)   shift; DIR_MAX="${1:-28}" ;;
         --dir-full)  DIR_FULLMODE=1 ;;
         --no-title)  TITLE=0 ;;
@@ -48,6 +55,11 @@ case "${TITLE_MAX}" in
     ''|*[!0-9]*) echo "✗ --title-max 必须是正整数"; exit 1 ;;
 esac
 [ "${TITLE_MAX}" -lt 8 ] && { echo "✗ --title-max 至少 8"; exit 1; }
+case "${SESS_MAX}" in
+    ''|*[!0-9]*) echo "✗ --session-max 必须是正整数"; exit 1 ;;
+esac
+# 下界 6：再短就连「-两位十六进制」加截断标记都放不下，徽标失去区分能力
+[ "${SESS_MAX}" -lt 6 ] && { echo "✗ --session-max 至少 6"; exit 1; }
 
 TS="$(date +%Y%m%d-%H%M%S)"
 HOOK_DIR="${HOME}/.config/claude-tmux"
@@ -97,6 +109,10 @@ C_IDLE='#[fg=colour240]'
 C_DIR='#[fg=colour245]'
 # 标题（你输入的第一句）是边框上信息量最大的一段，比目录亮一档
 C_TITLE='#[fg=colour252]'
+# session 名徽标：必须从目录的灰色系里跳出来，否则 ~/P/outcrop·c1 会读成一整条
+# 路径，而后缀才是你要扫的那两个字符。colour109 是本项目已有的灰蓝（活动边框
+# 用的就是它），和 wait 的橙、done 的绿都不冲突 —— 抢眼的名额留给 wait。
+C_SESS='#[fg=colour109]'
 
 if ! command -v tmux >/dev/null 2>&1; then
     echo "-  未找到 tmux，跳过 tmux 配置"
@@ -169,7 +185,7 @@ fi
 # --subshell 模式下图标走 win-state.sh 子进程，压根没这个串；目录段和
 # pane 边框的 @claude_state 又各是一种形态。漏认的后果是重复运行套娃。
 case "${WSF}${WSCF}${PBF}" in
-    *claude_win_state*|*win-state.sh*|*'|~|:pane_current_path'*|*@claude_state*)
+    *claude_win_state*|*win-state.sh*|*'|~|:pane_current_path'*|*@claude_state*|*@claude_session*)
         if [ -f "${ORIG_JSON}" ]; then
             echo "   已包过一层，改用先前存下的原始值（避免套娃）"
             WSF="$(orig_get window-status-format "${TMUX_DEF_WSF}")"
@@ -198,9 +214,25 @@ PYEOF
 fi
 
 # --- 构造格式串 -----------------------------------------------------------
+# 徽标独立成一段，紧跟 pane 序号 —— 「这是哪一个」（序号 + 名字）语义上归一类，
+# 放在一起读；也不会再像挂在路径尾巴上那样被读成目录的一部分。
+#
+# 截断保末尾不保开头（#{=/-N/}）：名字末尾那两位十六进制才是区分同名会话的
+# 全部信息量，从右边砍掉的恰恰是它；开头本来就和目录名重复，猜得出来。
+# 和目录段 --dir-max 的取舍是同一条理由。
+#
+# 空格写在条件内侧：没有会话的 pane 不该在序号后留一个孤零零的空格。
+SESS_PANE=""; TSEP=":"
+if [ "${SESS}" -eq 1 ]; then
+    SESS_PANE="#{?#{@claude_session}, ${C_SESS}#{=/-${SESS_MAX}/${I_ELL}:#{@claude_session}}#[default],}"
+    # 有徽标时，标题前的分隔符从 ':' 换成空格。否则是 "1 outcrop-c1:标题"，
+    # 那个冒号会被读成名字的一部分。没有徽标的 pane 仍是 "2:zsh"，一如既往。
+    TSEP="#{?#{@claude_session}, ,:}"
+fi
+
 PANE_ICON="#{?#{==:#{@claude_state},busy},${C_BUSY}${I_BUSY}#[default],#{?#{==:#{@claude_state},wait},${C_WAIT}${I_WAIT}#[default],#{?#{==:#{@claude_state},done},${C_DONE}${I_DONE}#[default],#{?#{==:#{@claude_state},hint},${C_HINT}${I_HINT}#[default],${C_IDLE}${I_IDLE}#[default]}}}}"
 # 冒号跟着内容走，不做固定前缀 —— 最窄那档没有内容，留个 "1:" 很怪
-PANE_FMT="${PANE_ICON} #{pane_index}"
+PANE_FMT="${PANE_ICON} #{pane_index}${SESS_PANE}"
 
 if [ "${SUBSHELL}" -eq 1 ]; then
     E="#(${WIN_SH} --read #{window_id})"
@@ -238,6 +270,11 @@ WIN_ICON="#{?#{==:${E},busy},${C_BUSY}${I_BUSY}${ICON_SEP}#[default],#{?#{==:${E
 # 里解析成该 pane 自己的路径（所以分屏后每块都显示自己的目录）。
 DIR_FULL='#{s|(\.?[^/])[^/]*/|\1/|:#{s|^#{HOME}|~|:pane_current_path}}'
 
+# --- session 名徽标 ------------------------------------------------------
+# 显示的是 ~/.claude/sessions/*.json 里的 name（跨会话通信寻址用的那个），
+# 由 state.sh 写进 pane 的 @claude_session。derived 的名字已经在 hook 里
+# 去掉了与目录重复的前半截，所以这里拿到的通常就是两个字符。
+#
 DIR_SEG=""; PD_FULL=""; PD_BASE=""
 if [ "${DIR}" -eq 1 ] && [ "${TAB_DIR}" -eq 1 ]; then
     # 父路径：先取 dirname 再缩写。dirname 之后末级不再是「你要认的名字」，
@@ -305,9 +342,12 @@ fi
 # 装饰实测 9 列；标题和目录各自的截断标记（…）是**额外**加的，
 # 也就是 #{=/N/…} 最多占 N+1 列 —— 两个各 +1。再留 1 列余量。
 OVH=12
+# 徽标在序号后面，也就是**每一档都有**，所以计入固定开销而不是目录那份预算：
+# 前导空格 1 列 + 名字最多 SESS_MAX 列 + 截断标记 1 列
+[ "${SESS}" -eq 1 ] && OVH=$(( OVH + SESS_MAX + 2 ))
 DW=0; [ "${DIR}" -eq 1 ] && DW="${DIR_MAX}"
 
-PB_CMD=":#{pane_current_command}"
+PB_CMD="${TSEP}#{pane_current_command}"
 if [ "${DIR}" -eq 1 ]; then
     PB_CMD="${PB_CMD}#{?pane_current_path,#{?#{e|>=:#{pane_width},46},${PD_FULL},#{?#{e|>=:#{pane_width},20},${PD_BASE},}},}"
 fi
@@ -326,6 +366,7 @@ if [ "${TITLE}" -eq 1 ]; then
     # 再加标记 1 列。
     TB_NARROW=$(( OVH + TT_NARROW ))
     TB_MIN=$(( 9 + TT_TINY + 1 ))
+    [ "${SESS}" -eq 1 ] && TB_MIN=$(( TB_MIN + SESS_MAX + 2 ))
     TB_MID=$(( OVH + TT_MID + DW ))
     TB_WIDE=$(( OVH + TITLE_MAX + DW ))
     # TITLE_MAX 调得比 20 还小时宽档会掉到中档下面，档位顺序就乱了
@@ -335,7 +376,7 @@ if [ "${TITLE}" -eq 1 ]; then
     T_MID="#{=/${TT_MID}/${I_ELL}:#{@claude_prompt}}"
     T_NARROW="#{=/${TT_NARROW}/${I_ELL}:#{@claude_prompt}}"
     T_TINY="#{=/${TT_TINY}/${I_ELL}:#{@claude_prompt}}"
-    PB_TITLE="#{?#{e|>=:#{pane_width},${TB_WIDE}},:${C_TITLE}${T_WIDE}#[default]${PD_FULL},#{?#{e|>=:#{pane_width},${TB_MID}},:${C_TITLE}${T_MID}#[default]${PD_FULL},#{?#{e|>=:#{pane_width},${TB_NARROW}},:${C_TITLE}${T_NARROW}#[default],#{?#{e|>=:#{pane_width},${TB_MIN}},:${C_TITLE}${T_TINY}#[default],}}}}"
+    PB_TITLE="#{?#{e|>=:#{pane_width},${TB_WIDE}},${TSEP}${C_TITLE}${T_WIDE}#[default]${PD_FULL},#{?#{e|>=:#{pane_width},${TB_MID}},${TSEP}${C_TITLE}${T_MID}#[default]${PD_FULL},#{?#{e|>=:#{pane_width},${TB_NARROW}},${TSEP}${C_TITLE}${T_NARROW}#[default],#{?#{e|>=:#{pane_width},${TB_MIN}},${TSEP}${C_TITLE}${T_TINY}#[default],}}}}"
     PANE_FMT="${PANE_FMT}#{?#{@claude_prompt},${PB_TITLE},${PB_CMD}}"
 else
     PANE_FMT="${PANE_FMT}${PB_CMD}"

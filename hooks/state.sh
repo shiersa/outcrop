@@ -15,6 +15,60 @@ STATE="${1:-idle}"
 [ -z "${TMUX_PANE:-}" ] && exit 0
 command -v tmux >/dev/null 2>&1 || exit 0
 
+# --- session 名：跨会话通信的寻址用名 -------------------------------------
+# 能拿去 @mention / SendMessage 的是 ~/.claude/sessions/<pid>.json 里的 name
+# 字段，**不是** hook payload 里那个 session_id（UUID 谁也记不住，而且 ListAgents
+# 根本不用它寻址）。pid 直接从 CLAUDE_CODE_MESSAGING_SOCKET 的 basename 取，
+# 省掉一次目录扫描；变量不存在时（跨会话通信被关掉、或版本低于 2.1.224）
+# 才退回按 tmux pane 反查 —— 注册表里正好存着 "tmux":"<sess>:@<win>.%<pane>"。
+#
+# 全程不用 python：这段每次 hook 都要跑，而 python 启动就要 ~40ms。注册表是
+# 机器生成的单行 JSON，'"name":"' 这个前缀在里面唯一（"nameSource":" 前缀不同，
+# 不会误命中）。
+SESSION_DIR="$HOME/.claude/sessions"
+
+_json_str() {  # _json_str <file> <key>
+    grep -o "\"$2\":\"[^\"]*\"" "$1" 2>/dev/null | head -1 | cut -d'"' -f4
+}
+
+session_name() {
+    local sf="" pid name
+    if [ -n "${CLAUDE_CODE_MESSAGING_SOCKET:-}" ]; then
+        pid="${CLAUDE_CODE_MESSAGING_SOCKET##*/}"; pid="${pid%.sock}"
+        [ -f "$SESSION_DIR/$pid.json" ] && sf="$SESSION_DIR/$pid.json"
+    fi
+    if [ -z "$sf" ]; then
+        sf="$(grep -l "\.${TMUX_PANE}\"" "$SESSION_DIR"/*.json 2>/dev/null | head -1)"
+    fi
+    [ -n "$sf" ] && [ -f "$sf" ] || return 1
+
+    name="$(_json_str "$sf" name)"
+    [ -n "$name" ] || return 1
+
+    # 存全名，不做任何裁剪。徽标是独立一段（不再挂在路径尾巴上），只显示
+    # 后缀的话就成了一个孤零零的 "c1"，没法直接拿去 @mention —— 而「看到什么
+    # 就能打什么」正是这个功能的全部意义。
+    # 装不下由显示层截断，那里才知道 pane 有多宽。
+    # tmux 会把 #[...] 当样式指令吃掉，# 加倍才是字面量（和 @claude_prompt 同理）
+    printf '%s' "$name" | sed 's/#/##/g'
+}
+
+write_session_name() {
+    local n
+    n="$(session_name)" || return 0
+    [ -n "$n" ] && tmux set-option -p -t "$TMUX_PANE" @claude_session "$n" 2>/dev/null
+    return 0
+}
+
+# SessionStart 走这条：只把 session 名写进去，不碰状态。
+# 不把它映射成 idle —— /clear 和 resume 也会触发 SessionStart，而 idle 是能清除
+# 粘性 wait 的两个状态之一，那会把「真在等你决策」的信号悄悄抹掉。
+if [ "$STATE" = "init" ]; then
+    write_session_name
+    tmux refresh-client -S 2>/dev/null || true
+    exit 0
+fi
+
 DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-tmux"
 mkdir -p "$DIR" 2>/dev/null || exit 0
 F="$DIR/${TMUX_PANE#%}"
@@ -32,6 +86,8 @@ fi
 
 printf '%s %s' "$STATE" "$(date +%s)" > "$F" 2>/dev/null || true
 tmux set-option -p -t "$TMUX_PANE" @claude_state "$STATE" 2>/dev/null || true
+# 每次都重写：/rename 之后名字会变，只在 SessionStart 写一次就会长期显示旧名
+write_session_name
 
 # --- pane 标题：把你输入的第一句存进 @claude_prompt -----------------------
 # busy 有两个来源：UserPromptSubmit（你敲了东西）和 PostToolUse（你答完了
@@ -102,6 +158,9 @@ sys.stdout.write(p.replace("#", "##"))
 fi
 # 会话结束就把标题摘掉，否则 pane 回到 shell 了边框还挂着上一轮的输入
 [ "$STATE" = "idle" ] && tmux set-option -pu -t "$TMUX_PANE" @claude_prompt 2>/dev/null
+# session 名同样要摘：会话都结束了还挂着名字，标签栏的「只有一个 session
+# 才显示」那条判断就会把已经死掉的 pane 算进去
+[ "$STATE" = "idle" ] && tmux set-option -pu -t "$TMUX_PANE" @claude_session 2>/dev/null
 
 tmux refresh-client -S 2>/dev/null || true
 
