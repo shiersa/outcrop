@@ -73,11 +73,21 @@ var glmDefaultEndpoints = map[string]glmEndpoint{
 }
 
 // glmDefaultFields 是字段命名的兜底候选；每个站点可在 glm.json 里覆盖。
+//
+// used_pct / mcp_pct 的首选是带兄弟过滤的选择器（语法见 parseFieldSpec）。
+// 智谱两个站点的 limits[] 里三个限额**都叫 percentage**，只能靠 type/unit 区分。
+// 早先按裸名字取，dig 递归命中的是数组第一个 —— 实测那是 TIME_LIMIT unit5
+// （月度工具调用），不是标着 5h 的 TOKENS_LIMIT unit3。一次真实响应里
+// 前者 1%、后者 13%，也就是那个数字一直在报错的窗口。
+//
+// 刻意不留裸 "percentage" 兜底：过滤没命中说明上游把 type/unit 改了，
+// 这时候退回「取数组第一个」等于恢复原来那个静默取错的行为 ——
+// 显示不出来比显示错的强。
 var glmDefaultFields = map[string][]string{
-	"used_pct": {"used_pct", "usedPercent", "percent", "usage_rate"},
+	"used_pct": {"percentage@type=TOKENS_LIMIT&unit=3", "used_pct", "usedPercent", "percent", "usage_rate"},
 	"used":     {"used", "used_tokens", "usedTokens"},
 	"total":    {"total", "limit", "quota", "total_tokens"},
-	"mcp_pct":  {"mcp_used_pct", "mcpPercent", "mcp_usage"},
+	"mcp_pct":  {"percentage@type=TIME_LIMIT&unit=5", "mcp_used_pct", "mcpPercent", "mcp_usage"},
 }
 
 type glmEndpoint struct {
@@ -938,7 +948,7 @@ type quotaBlob struct {
 	Error string          `json:"error,omitempty"`
 }
 
-func glmQuotaCached(siteKey string) (map[string]interface{}, time.Duration) {
+func glmQuotaCached(siteKey string) (map[string]interface{}, string, time.Duration) {
 	var blob quotaBlob
 	_ = loadJSON(glmCachePath(siteKey), &blob)
 	age := time.Since(time.Unix(blob.TS, 0))
@@ -951,14 +961,17 @@ func glmQuotaCached(siteKey string) (map[string]interface{}, time.Duration) {
 			go func() { _ = cmd.Wait() }()
 		}
 	}
+	if blob.Error != "" {
+		return nil, blob.Error, age
+	}
 	if len(blob.Data) == 0 {
-		return nil, age
+		return nil, "", age
 	}
 	var m map[string]interface{}
 	if json.Unmarshal(blob.Data, &m) != nil {
-		return nil, age
+		return nil, "", age
 	}
-	return m, age
+	return m, "", age
 }
 
 func glmQuotaRefresh() {
@@ -993,17 +1006,127 @@ func glmQuotaRefresh() {
 	if err != nil {
 		return
 	}
+	if msg, bad := glmRespError(resp.StatusCode, body); bad {
+		// 存成 Error 而不是 Data。早先不判这个，401 的错误体被当成有效数据
+		// 缓存下来，渲染时 dig 在里面找不到字段，就报「字段未匹配」——
+		// 把鉴权/端点问题显示成字段问题，指的方向完全是错的。
+		_ = saveJSON(path, quotaBlob{TS: time.Now().Unix(), Error: msg})
+		return
+	}
 	_ = saveJSON(path, quotaBlob{TS: time.Now().Unix(), Data: body})
+}
+
+// glmRespError 判断这次响应算不算失败，返回给人看的原因。
+// 业务层必须单独判：两个站点都用 {code,msg,success} 包一层，token 不对时
+// HTTP 状态仍是 200，只有 body 里 code=401 / success=false —— 只看状态码会漏。
+func glmRespError(status int, body []byte) (string, bool) {
+	if status < 200 || status >= 300 {
+		return fmt.Sprintf("HTTP %d: %s", status, snippet(body, 120)), true
+	}
+	var st struct {
+		Code    int    `json:"code"`
+		Msg     string `json:"msg"`
+		Success *bool  `json:"success"`
+	}
+	if json.Unmarshal(body, &st) != nil {
+		return "", false // 不是这个信封格式，交给字段匹配去判
+	}
+	if (st.Success != nil && !*st.Success) || (st.Code != 0 && st.Code != 200) {
+		msg := st.Msg
+		if msg == "" {
+			msg = snippet(body, 120)
+		}
+		return fmt.Sprintf("code %d: %s", st.Code, msg), true
+	}
+	return "", false
+}
+
+// snippet 按**字符**截断而不是字节 —— 错误信息可能是中文，
+// 按字节切会把多字节字符切成半个，终端上显示成乱码。
+func snippet(b []byte, n int) string {
+	s := strings.TrimSpace(string(b))
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // dig 在嵌套结构里找第一个匹配的 key。
 // 响应结构未公开确认，所以宽松匹配 —— 跑 --verify 看真实字段名。
+// fieldSpec 是一个字段候选：名字 + 可选的「兄弟字段必须等于某值」约束。
+// 语法 name@k=v&k2=v2，例：percentage@type=TOKENS_LIMIT&unit=3
+// 数组里若干元素结构相同、只有兄弟字段能区分时，光按名字取会命中第一个，
+// 而顺序由上游决定 —— 它一改，取值就静默换了对象。
+type fieldSpec struct {
+	name   string
+	filter map[string]string
+}
+
+func parseFieldSpec(s string) fieldSpec {
+	name, cond, ok := strings.Cut(s, "@")
+	fs := fieldSpec{name: strings.TrimSpace(name)}
+	if !ok || strings.TrimSpace(cond) == "" {
+		return fs
+	}
+	fs.filter = map[string]string{}
+	for _, kv := range strings.Split(cond, "&") {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			fs.filter[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return fs
+}
+
+// scalarStr 把 JSON 标量转成可比较的字符串。数字必须走 -1 精度：
+// JSON 里的 unit:3 解出来是 float64(3)，默认格式化成 "3.000000"，
+// 跟配置里写的 "3" 比不上。
+func scalarStr(v interface{}) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(x)
+	}
+	return ""
+}
+
+func (fs fieldSpec) siblingsMatch(m map[string]interface{}) bool {
+	for fk, fv := range fs.filter {
+		hit := false
+		for k, v := range m {
+			if strings.EqualFold(k, fk) && strings.EqualFold(scalarStr(v), fv) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			return false
+		}
+	}
+	return true
+}
+
 func dig(obj interface{}, names ...string) (float64, bool) {
+	specs := make([]fieldSpec, 0, len(names))
+	for _, n := range names {
+		specs = append(specs, parseFieldSpec(n))
+	}
+	return digSpec(obj, specs)
+}
+
+func digSpec(obj interface{}, specs []fieldSpec) (float64, bool) {
 	switch v := obj.(type) {
 	case map[string]interface{}:
-		for _, n := range names {
+		for _, sp := range specs {
+			// 带过滤的候选只在「兄弟字段对得上」的那一层才算数
+			if len(sp.filter) > 0 && !sp.siblingsMatch(v) {
+				continue
+			}
 			for k, val := range v {
-				if strings.EqualFold(k, n) {
+				if strings.EqualFold(k, sp.name) {
 					if f, ok := toFloat(val); ok {
 						return f, true
 					}
@@ -1016,13 +1139,13 @@ func dig(obj interface{}, names ...string) (float64, bool) {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			if f, ok := dig(v[k], names...); ok {
+			if f, ok := digSpec(v[k], specs); ok {
 				return f, true
 			}
 		}
 	case []interface{}:
 		for _, val := range v {
-			if f, ok := dig(val, names...); ok {
+			if f, ok := digSpec(val, specs); ok {
 				return f, true
 			}
 		}
@@ -1354,8 +1477,13 @@ func renderGLMQuota() string {
 	if !ok {
 		return cGray + "quota n/a" + cReset
 	}
-	q, age := glmQuotaCached(siteKey)
+	q, qerr, age := glmQuotaCached(siteKey)
 	if q == nil {
+		if qerr != "" {
+			// 显示原因而不是灰色的「…」：拿不到额度多半是 token 配错，
+			// 而「…」看着像还在加载，会让人一直等下去
+			return cRed + "额度 " + snippet([]byte(qerr), 16) + cReset
+		}
 		return cGray + "quota …" + cReset
 	}
 	var segs []string
