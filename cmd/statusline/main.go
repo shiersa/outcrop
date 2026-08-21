@@ -134,6 +134,11 @@ func loadGLMConfig() glmConfig {
 	if len(probe.Endpoints) > 0 && strings.TrimSpace(string(probe.Endpoints)) != "null" {
 		var c glmConfig
 		if json.Unmarshal(raw, &c) == nil {
+			// 落盘失败也不影响本次渲染 —— 内存里已经是迁移后的值，
+			// 大不了下次启动再试一遍
+			if migrateGLMFields(c) {
+				saveGLMEndpoints(raw, c.Endpoints)
+			}
 			return c
 		}
 	}
@@ -145,6 +150,63 @@ func loadGLMConfig() glmConfig {
 
 // migrateLegacyGLM 把旧的单 endpoint 结构升级成 endpoints 映射：旧 endpoint 按 URL
 // 域名片段归位（保留用户实测的 fields），另一个内置站点补默认；保留 _comment 等顶层键。
+// glmStaleFields 是 v1.1.0 之前写下的字段映射：按裸名字取，dig 会命中 limits[]
+// 的第一个元素。键是 fields 里的项，old 是要替换掉的老候选名，new 是带兄弟过滤
+// 的新写法。
+var glmStaleFields = map[string]struct{ old, new string }{
+	"used_pct": {"percentage", "percentage@type=TOKENS_LIMIT&unit=3"},
+	"mcp_pct":  {"currentValue", "percentage@type=TIME_LIMIT&unit=5"},
+}
+
+// migrateGLMFields 把老的裸名字映射升级成带兄弟过滤的写法。
+//
+// 为什么非要自动迁移：install.sh 遇到已存在的 glm.json 会保留不覆盖（否则你自己
+// 改过的 url / auth_scheme 每次升级都被冲掉），于是升级后是「新代码 + 老配置」——
+// 代码看得懂过滤写法，配置里却没写，5h 照旧取到 TIME_LIMIT unit5。
+// 而它错得很安静：数字看着完全正常，只是取的是另一个窗口，没人会发现。
+// 靠 release notes 让人手动改，半年后等于没改。
+//
+// 只替换**精确等于**老名字的那一项，其余候选原样保留；替换而不是追加，
+// 是为了不把裸 percentage 留成兜底 —— 那等于过滤失效时悄悄退回原来的错。
+// 一项都没命中就不落盘，否则每次渲染都写一遍文件，攒出一堆内容相同的 .bak
+// （同一个坑 --sync-pricing 和 register.py 都栽过）。
+func migrateGLMFields(c glmConfig) bool {
+	changed := false
+	for site, ep := range c.Endpoints {
+		for key, sub := range glmStaleFields {
+			cands, ok := ep.Fields[key]
+			if !ok {
+				continue
+			}
+			for i, name := range cands {
+				if strings.EqualFold(strings.TrimSpace(name), sub.old) {
+					cands[i] = sub.new
+					changed = true
+				}
+			}
+			ep.Fields[key] = cands
+		}
+		c.Endpoints[site] = ep
+	}
+	return changed
+}
+
+// saveGLMEndpoints 只改写 endpoints 这一个顶层键，_comment 之类原样保留。
+func saveGLMEndpoints(raw []byte, eps map[string]glmEndpoint) {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(raw, &top) != nil {
+		return
+	}
+	b, err := json.MarshalIndent(eps, "", "  ")
+	if err != nil {
+		return
+	}
+	top["endpoints"] = b
+	if _, err := backupFile(glmCfgPath); err == nil {
+		_ = saveJSON(glmCfgPath, top)
+	}
+}
+
 func migrateLegacyGLM(raw []byte) glmConfig {
 	var top map[string]json.RawMessage
 	if json.Unmarshal(raw, &top) != nil {
