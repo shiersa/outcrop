@@ -53,6 +53,29 @@ session_name() {
     printf '%s' "$name" | sed 's/#/##/g'
 }
 
+# claude_pid 返回本 pane 里 Claude Code 进程的 pid，取不到就空。
+# 用途是让别人判断「这个 pane 的会话是不是已经没了」——busy/wait 没有 TTL，
+# SessionEnd 没跑到时会永久挂着。
+#
+# socket 的 basename 就是 pid（/tmp/cc-socks/85971.sock -> 85971），一次字符串
+# 截取搞定。变量不在时退回注册表按 pane 反查。
+#
+# ⚠️ 判存活只能用 kill -0，**不能**拿 socket 文件是否存在当依据：
+# 早于跨会话通信的 Claude Code 压根不建那个 socket，实测三个还在跑的
+# 2.1.226 会话全都没有 socket，照 socket 判会把活会话全判成死的。
+claude_pid() {
+    local pid sf
+    if [ -n "${CLAUDE_CODE_MESSAGING_SOCKET:-}" ]; then
+        pid="${CLAUDE_CODE_MESSAGING_SOCKET##*/}"; pid="${pid%.sock}"
+        case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+        [ -n "$pid" ] && { printf '%s' "$pid"; return 0; }
+    fi
+    sf="$(grep -l "\.${TMUX_PANE}\"" "$SESSION_DIR"/*.json 2>/dev/null | head -1)"
+    [ -n "$sf" ] || return 1
+    pid="$(grep -o '"pid":[0-9]*' "$sf" 2>/dev/null | head -1 | cut -d: -f2)"
+    [ -n "$pid" ] && printf '%s' "$pid"
+}
+
 write_session_name() {
     local n
     n="$(session_name)" || return 0
@@ -84,7 +107,9 @@ if [ "$PREV" = "wait" ]; then
     esac
 fi
 
-printf '%s %s' "$STATE" "$(date +%s)" > "$F" 2>/dev/null || true
+# 第三列是 claude 的 pid —— win-state.sh 靠它判断 busy/wait 是不是残留。
+# 多写一列对老文件向后兼容：读的时候按 -f3 取，取不到就是空，行为不变。
+printf '%s %s %s' "$STATE" "$(date +%s)" "$(claude_pid)" > "$F" 2>/dev/null || true
 tmux set-option -p -t "$TMUX_PANE" @claude_state "$STATE" 2>/dev/null || true
 # 每次都重写：/rename 之后名字会变，只在 SessionStart 写一次就会长期显示旧名
 write_session_name
