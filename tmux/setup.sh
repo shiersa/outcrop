@@ -531,3 +531,24 @@ if [ -n "${TMUX:-}" ]; then
         && echo "   ✓ 已重载 tmux 配置" \
         || echo "   ⚠️  重载失败，手动: tmux source-file ~/.tmux.conf"
 fi
+
+# --- activity 反色 vs 选中态：装完当场提示，别等 doctor -------------------
+# monitor-activity 开着时，tmux 给「后台有输出的窗口」的默认样式是 reverse ——
+# 反出来的灰块常比主题给当前窗口的底色还亮，看着比真选中的 tab 还像选中。
+# 且 Claude Code 后台常有流式输出，块会常驻；忙不忙标签栏的 ● 已经在说。
+# 只提示不代改：activity 样式是用户主题的地盘，managed block 不越界。
+MA=""; AS=""
+if [ -n "${TMUX:-}" ]; then
+    MA="$(tmux show-options -gwv monitor-activity 2>/dev/null || echo '')"
+    AS="$(tmux display-message -p '#{window-status-activity-style}' 2>/dev/null || echo '')"
+fi
+# tmux 外（或老 tmux 的格式串展开不了选项名）退回静态看配置文件
+[ -z "${MA}" ] && grep -Eq '^[^#]*monitor-activity +on' "${TMUX_CONF}" 2>/dev/null && MA="on"
+if [ -z "${AS}" ] && ! grep -q 'window-status-activity-style' "${TMUX_CONF}" 2>/dev/null; then
+    AS="reverse"   # 从没显式设置过 = 还在用默认值
+fi
+if [ "${MA}" = "on" ] && [ "${AS}" = "reverse" ]; then
+    echo "   ⚠️  monitor-activity 开着且 activity 样式是默认的 reverse ——"
+    echo "      后台有输出的 tab 会披上灰底块，比选中态还醒目，容易看错当前窗口。"
+    echo "      建议加进 ~/.tmux.conf：  set -g window-status-activity-style none"
+fi
