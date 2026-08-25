@@ -25,7 +25,12 @@ command -v tmux >/dev/null 2>&1 || exit 0
 # 全程不用 python：这段每次 hook 都要跑，而 python 启动就要 ~40ms。注册表是
 # 机器生成的单行 JSON，'"name":"' 这个前缀在里面唯一（"nameSource":" 前缀不同，
 # 不会误命中）。
-SESSION_DIR="$HOME/.claude/sessions"
+#
+# 注册表跟着 CLAUDE_CONFIG_DIR 走：cc-glm / cc-go 这类 profile 的会话注册在
+# ~/.claude-glm/sessions 等目录下。这里写死 ~/.claude 的话，第三方 profile 的
+# pane 永远显示不出 session 名 —— 看起来像"只有官方账号才有"，其实是找错了地方。
+# hook 是 claude 的子进程，能继承到 profile 入口设置的这个变量。
+SESSION_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
 
 _json_str() {  # _json_str <file> <key>
     grep -o "\"$2\":\"[^\"]*\"" "$1" 2>/dev/null | head -1 | cut -d'"' -f4

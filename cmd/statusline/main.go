@@ -2035,7 +2035,13 @@ func prettyJSON(raw json.RawMessage) string {
 }
 
 func latestTranscript() (string, time.Time) {
-	root := filepath.Join(home, ".claude", "projects")
+	// transcript 跟着 CLAUDE_CONFIG_DIR 走（cc-glm / cc-go 各有一套目录）。
+	// 渲染路径不经这里 —— transcript_path 由 stdin 给；这只影响 --verify。
+	cfgDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if cfgDir == "" {
+		cfgDir = filepath.Join(home, ".claude")
+	}
+	root := filepath.Join(cfgDir, "projects")
 	var best string
 	var bestT time.Time
 	_ = filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
