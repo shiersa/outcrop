@@ -561,6 +561,8 @@ func detectProvider() (string, string) {
 	case strings.Contains(base, "bigmodel.cn"), strings.Contains(base, "z.ai"),
 		strings.Contains(base, "zhipu"):
 		return "glm", base
+	case strings.Contains(base, "opencode.ai"):
+		return "opencode", base
 	case strings.Contains(base, "deepseek"):
 		return "deepseek", base
 	case strings.Contains(base, "127.0.0.1"), strings.Contains(base, "localhost"),
@@ -1010,12 +1012,13 @@ type quotaBlob struct {
 	Error string          `json:"error,omitempty"`
 }
 
-func glmQuotaCached(siteKey string) (map[string]interface{}, string, time.Duration) {
+// quotaCachedRaw 读缓存，过期就起子进程后台刷新（GLM / opencode 共用）。
+// 子进程继承 env，自己按 ANTHROPIC_BASE_URL 解析该刷哪家，无需传参。
+func quotaCachedRaw(path string) (json.RawMessage, string, time.Duration) {
 	var blob quotaBlob
-	_ = loadJSON(glmCachePath(siteKey), &blob)
+	_ = loadJSON(path, &blob)
 	age := time.Since(time.Unix(blob.TS, 0))
 	if age > quotaTTL {
-		// 子进程继承 env，自己按 ANTHROPIC_BASE_URL 解析站点，无需传参。
 		if exe, err := os.Executable(); err == nil {
 			cmd := exec.Command(exe, "--refresh-quota")
 			cmd.Stdout, cmd.Stderr, cmd.Stdin = nil, nil, nil
@@ -1026,11 +1029,19 @@ func glmQuotaCached(siteKey string) (map[string]interface{}, string, time.Durati
 	if blob.Error != "" {
 		return nil, blob.Error, age
 	}
-	if len(blob.Data) == 0 {
+	return blob.Data, "", age
+}
+
+func glmQuotaCached(siteKey string) (map[string]interface{}, string, time.Duration) {
+	data, errMsg, age := quotaCachedRaw(glmCachePath(siteKey))
+	if errMsg != "" {
+		return nil, errMsg, age
+	}
+	if len(data) == 0 {
 		return nil, "", age
 	}
 	var m map[string]interface{}
-	if json.Unmarshal(blob.Data, &m) != nil {
+	if json.Unmarshal(data, &m) != nil {
 		return nil, "", age
 	}
 	return m, "", age
@@ -1112,6 +1123,151 @@ func snippet(b []byte, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// ---------------------------------------------------------------------------
+// opencode 额度：同 GLM 的后台刷新 + 缓存模式
+// ---------------------------------------------------------------------------
+//
+// 端点是实测出来的，官方没有文档（2026-08-25）：
+//   GET <ANTHROPIC_BASE_URL>/v1/usage   例 https://opencode.ai/zen/go/v1/usage
+//   鉴权 Authorization: Bearer <key> —— 注意 messages 端点用的是 x-api-key，
+//   两个端点鉴权方式不同，拿 messages 的方式打 usage 会 401 "Missing API key"。
+// 响应三个窗口的字段都叫 percent，只能按路径取，不能用 dig 按名字找 ——
+// 那会命中第一个，和 GLM limits[] 数组当年静默取错是同一个坑，而且这里
+// 窗口对象下没有 type/unit 这种能做兄弟过滤的稳定字段，出错连补救都没有。
+
+type opencodeWindow struct {
+	Status   string   `json:"status"`
+	Percent  *float64 `json:"percent"` // 指针：区分「上游改了结构」和真实的 0%
+	ResetsAt string   `json:"resetsAt"`
+}
+
+type opencodeUsage struct {
+	Usage struct {
+		Rolling opencodeWindow `json:"rolling"` // 5h 滚动窗（Go 档 $12）
+		Weekly  opencodeWindow `json:"weekly"`  // $30
+		Monthly opencodeWindow `json:"monthly"` // $60
+	} `json:"usage"`
+}
+
+// opencodeUsageURL 从 base_url 推导 usage 端点。不硬编码完整地址：
+// Zen 按订阅档位分路径（/zen/go/、/zen/…），跟着 base 走换档位不用改代码。
+func opencodeUsageURL() string {
+	base := strings.TrimRight(os.Getenv("ANTHROPIC_BASE_URL"), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/v1/usage"
+}
+
+func opencodeCachePath() string {
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			return r
+		}
+		return '_'
+	}, strings.TrimPrefix(strings.TrimPrefix(
+		strings.ToLower(os.Getenv("ANTHROPIC_BASE_URL")), "https://"), "http://"))
+	if safe == "" {
+		safe = "default"
+	}
+	return filepath.Join(cacheDir, "opencode_quota-"+safe+".json")
+}
+
+func opencodeToken() string {
+	// cc-go 走 ANTHROPIC_API_KEY（x-api-key 那套）；其余是兜底
+	for _, k := range []string{"ANTHROPIC_API_KEY", "OPENCODE_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func opencodeQuotaRefresh() {
+	token := opencodeToken()
+	url := opencodeUsageURL()
+	if token == "" || url == "" {
+		return
+	}
+	path := opencodeCachePath()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	client := &http.Client{Timeout: netTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		_ = saveJSON(path, quotaBlob{TS: time.Now().Unix(), Error: err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return
+	}
+	if msg, bad := opencodeRespError(resp.StatusCode, body); bad {
+		// 同 GLM：错误体存成 Error 而不是 Data，别把鉴权问题渲染成字段问题
+		_ = saveJSON(path, quotaBlob{TS: time.Now().Unix(), Error: msg})
+		return
+	}
+	_ = saveJSON(path, quotaBlob{TS: time.Now().Unix(), Data: body})
+}
+
+// opencodeRespError：opencode 的错误信封是 {"type":"error","error":{"type","message"}}，
+// 鉴权错会给真实的非 2xx 状态码，但信封判断仍要留着 —— 上游行为没承诺过。
+func opencodeRespError(status int, body []byte) (string, bool) {
+	var env struct {
+		Type  string `json:"type"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &env) == nil && env.Type == "error" {
+		msg := env.Error.Message
+		if msg == "" {
+			msg = snippet(body, 120)
+		}
+		return msg, true
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Sprintf("HTTP %d: %s", status, snippet(body, 120)), true
+	}
+	return "", false
+}
+
+func renderOpencodeQuota() string {
+	data, qerr, age := quotaCachedRaw(opencodeCachePath())
+	if len(data) == 0 {
+		if qerr != "" {
+			return cRed + "额度 " + snippet([]byte(qerr), 16) + cReset
+		}
+		return cGray + "quota …" + cReset
+	}
+	var u opencodeUsage
+	if json.Unmarshal(data, &u) != nil || u.Usage.Rolling.Percent == nil {
+		// 解析得开但 rolling.percent 没了 = 上游改结构了。
+		// 不做兜底猜测：显示不出来比显示错的强（glm.json 同款立场）。
+		return cRed + "字段未匹配" + cReset
+	}
+	var segs []string
+	p := *u.Usage.Rolling.Percent
+	segs = append(segs, fmt.Sprintf("%s5h %s %.0f%%%s", pctColor(p), bar(p, 5), p, cReset))
+	// wk/mo 变化慢，不上进度条，省 statusline 的横向空间
+	if w := u.Usage.Weekly.Percent; w != nil {
+		segs = append(segs, fmt.Sprintf("%swk %.0f%%%s", pctColor(*w), *w, cReset))
+	}
+	if m := u.Usage.Monthly.Percent; m != nil {
+		segs = append(segs, fmt.Sprintf("%smo %.0f%%%s", pctColor(*m), *m, cReset))
+	}
+	if age > 3*quotaTTL {
+		segs = append(segs, cDim+"stale"+cReset)
+	}
+	return strings.Join(segs, sep)
 }
 
 // dig 在嵌套结构里找第一个匹配的 key。
@@ -1349,13 +1505,15 @@ var widgets = map[string]func(widgetCtx) string{
 			return cGray + "quota n/a" + cReset
 		case "glm":
 			return renderGLMQuota()
+		case "opencode":
+			return renderOpencodeQuota()
 		}
 		return ""
 	},
 
 	"tokens": func(c widgetCtx) string {
 		if !c.t.SawUsage {
-			if c.provider == "anthropic" || c.provider == "glm" {
+			if c.provider == "anthropic" || c.provider == "glm" || c.provider == "opencode" {
 				return ""
 			}
 			return cRed + "no usage" + cReset
@@ -1383,7 +1541,9 @@ var widgets = map[string]func(widgetCtx) string{
 				return cYellow + fmt.Sprintf("$%.3f", f) + cReset
 			}
 		}
-		if c.provider == "anthropic" || c.provider == "glm" || c.provider == "local" {
+		// opencode 也在抑制之列：订阅制，估出来的是折合价不是账单
+		if c.provider == "anthropic" || c.provider == "glm" || c.provider == "local" ||
+			c.provider == "opencode" {
 			return ""
 		}
 		if !c.t.SawUsage {
@@ -1761,8 +1921,9 @@ func cmdVerify() {
 		fmt.Println()
 	}
 
-	fmt.Println("4. 智谱额度接口")
-	if provider == "glm" {
+	fmt.Println("4. 第三方额度接口")
+	switch provider {
+	case "glm":
 		glmQuotaRefresh()
 		siteKey, _, ok := resolveGLMSite(loadGLMConfig(), os.Getenv("ANTHROPIC_BASE_URL"))
 		var blob quotaBlob
@@ -1772,8 +1933,18 @@ func cmdVerify() {
 		} else {
 			fmt.Printf("   ✗ 请求失败或没有 ANTHROPIC_AUTH_TOKEN: %s\n", blob.Error)
 		}
-	} else {
-		fmt.Println("   -  当前不在 GLM profile 下，跳过。切到 cc-glm / cc-ally-glm 再跑一次。")
+	case "opencode":
+		opencodeQuotaRefresh()
+		var blob quotaBlob
+		if loadJSON(opencodeCachePath(), &blob) == nil && len(blob.Data) > 0 {
+			fmt.Println("   ✓ 原始响应（按路径取 usage.rolling/weekly/monthly.percent）:")
+			fmt.Println(truncate(prettyJSON(blob.Data), 1500))
+		} else {
+			fmt.Printf("   ✗ 请求失败或没有 ANTHROPIC_API_KEY: %s\n", blob.Error)
+			fmt.Println("      -> usage 端点鉴权是 Bearer，和 messages 的 x-api-key 不是一套")
+		}
+	default:
+		fmt.Println("   -  当前不在 GLM / opencode profile 下，跳过。切到 cc-glm / cc-go 再跑一次。")
 	}
 	fmt.Println()
 
@@ -2632,7 +2803,12 @@ func main() {
 			cmdDumpInput()
 			return
 		case "--refresh-quota":
-			glmQuotaRefresh()
+			// 子进程按继承的 env 判断该刷哪家
+			if p, _ := detectProvider(); p == "opencode" {
+				opencodeQuotaRefresh()
+			} else {
+				glmQuotaRefresh()
+			}
 			return
 		case "--version":
 			fmt.Printf("claude-statusline %s\n", buildVersion)
