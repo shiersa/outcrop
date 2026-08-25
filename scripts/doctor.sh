@@ -179,6 +179,24 @@ else
             *"bg=colour160"*|*"bg=colour44"*) warn "wait 还是旧配色（红底/青底）—— 重跑 tmux/setup.sh 更新" ;;
             *) warn "wait 分支没渲染出预期配色（--ascii 模式下属正常）" ;;
         esac
+
+        # activity 反色 vs 选中态：monitor-activity 开着时，tmux 给「后台有输出
+        # 的窗口」的默认样式是 reverse —— 反出来的灰块往往比主题给当前窗口的
+        # 底色还亮，看着比真选中的 tab 还像选中。且 Claude Code 后台常有流式
+        # 输出，块会常驻。忙不忙 ● 图标已经在说，这个块只剩误导。
+        MA="$(tmux show-options -gwv monitor-activity 2>/dev/null || echo '')"
+        AS="$(tmux display-message -p '#{window-status-activity-style}' 2>/dev/null || echo '')"
+        # 老 tmux 的格式串展开不了选项名（拿到空）——退回看配置文件：
+        # 从没显式设置过就是还在用默认值 reverse
+        if [ -z "${AS}" ] && ! grep -q 'window-status-activity-style' "${TMUX_CONF}"; then
+            AS="reverse"
+        fi
+        if [ "${MA}" = "on" ] && [ "${AS}" = "reverse" ]; then
+            warn "monitor-activity 开着且 activity 样式是默认的 reverse —— 灰底块会比选中态更醒目"
+            echo "        set -g window-status-activity-style none   # 加进 ~/.tmux.conf 即可"
+        else
+            ok "activity 高亮不会与选中态抢戏"
+        fi
         # 目录段真的算出路径了吗 —— 正则写错时 tmux 不报错，只是渲染成空
         if [ "${DIR_ON}" -eq 1 ]; then
             D="$(tmux display-message -p '#{s|(\.?[^/])[^/]*/|\1/|:#{s|^#{HOME}|~|:pane_current_path}}' 2>/dev/null || echo '')"
