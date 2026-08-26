@@ -201,6 +201,10 @@ if [ "$STATE" = "wait" ] && [ "$PREV" != "wait" ] && [ "$NOTIFY" = "1" ]; then
     # 正好在你最需要看标签栏的时候把标签栏盖住。
     if command -v osascript >/dev/null 2>&1; then
         osascript -e "display notification \"${W}\" with title \"Claude 需要你介入\" sound name \"Funk\"" >/dev/null 2>&1 || true
+    elif command -v notify-send >/dev/null 2>&1; then
+        # Linux 桌面走 libnotify。WSL/无桌面的服务器两者都没有，静默跳过 ——
+        # 标签栏的橙底 wait 仍在，只是少了系统级弹窗。
+        notify-send "Claude 需要你介入" "${W}" >/dev/null 2>&1 || true
     fi
 fi
 exit 0

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# outcrop 发布打包：交叉编译 darwin universal 二进制，连同安装脚本和配置模板打成 tar.gz。
+# outcrop 发布打包：交叉编译各平台二进制，连同安装脚本和配置模板打成 tar.gz。
 # 目标机器不需要 Go，也不需要这个仓库 —— 解压后直接 ./install.sh。
 #
 # 用法:
 #   ./scripts/release.sh
 #
-# 产出:
-#   dist/outcrop-<版本>-darwin-universal.tar.gz   （无 lipo 时是 -darwin-arm64）
-#   dist/outcrop-<版本>-darwin-universal.tar.gz.sha256
+# 产出（每个平台一对 tar.gz + 自解压 .sh，各带 sha256）:
+#   dist/outcrop-<版本>-darwin-universal.*   （无 lipo 时是 -darwin-arm64）
+#   dist/outcrop-<版本>-linux-amd64.*  /  -linux-arm64.*
 #
 set -uo pipefail
 
@@ -48,20 +48,19 @@ echo "===== 交叉编译（version=${VERSION}）====="
 echo
 
 build_arch() {
-    local goarch="$1" out="$2"
-    GOOS=darwin GOARCH="${goarch}" CGO_ENABLED=0 \
+    local goos="$1" goarch="$2" out="$3"
+    GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
         go build -ldflags="${LDFLAGS}" -o "${out}" ./cmd/statusline
 }
 
 ARM="${TMPDIR}/${BIN_NAME}.arm64"
 AMD="${TMPDIR}/${BIN_NAME}.amd64"
-UNI="${TMPDIR}/${BIN_NAME}"
+UNI="${TMPDIR}/${BIN_NAME}.darwin"
 HAVE_ARM=0
 HAVE_AMD=0
 
-if build_arch arm64 "${ARM}"; then echo "✓ darwin/arm64"; HAVE_ARM=1; else echo "✗ darwin/arm64 失败"; fi
-if build_arch amd64 "${AMD}"; then echo "✓ darwin/amd64"; HAVE_AMD=1; else echo "✗ darwin/amd64 失败"; fi
-echo
+if build_arch darwin arm64 "${ARM}"; then echo "✓ darwin/arm64"; HAVE_ARM=1; else echo "✗ darwin/arm64 失败"; fi
+if build_arch darwin amd64 "${AMD}"; then echo "✓ darwin/amd64"; HAVE_AMD=1; else echo "✗ darwin/amd64 失败"; fi
 
 if [ "${HAVE_ARM}" -eq 0 ]; then
     echo "✗ arm64 编译失败，无法继续"
@@ -72,7 +71,7 @@ fi
 ARCH_TAG="universal"
 if [ "${HAVE_AMD}" -eq 1 ] && command -v lipo >/dev/null 2>&1; then
     lipo -create -output "${UNI}" "${ARM}" "${AMD}"
-    echo "✓ lipo 合成 universal（arm64 + amd64）"
+    echo "✓ lipo 合成 universal（arm64 + amd64: $(lipo -archs "${UNI}" 2>/dev/null)）"
 else
     if ! command -v lipo >/dev/null 2>&1; then
         echo "⚠️  没有 lipo（装 Xcode Command Line Tools 即有），只出 arm64"
@@ -83,6 +82,15 @@ else
     cp "${ARM}" "${UNI}"
     ARCH_TAG="arm64"
 fi
+
+# Linux 没有 universal 一说，一个架构一个包。纯 Go + CGO_ENABLED=0，
+# 在 mac 上就能交叉出 Linux 产物，不需要任何工具链。
+LNX_AMD="${TMPDIR}/${BIN_NAME}.linux-amd64"
+LNX_ARM="${TMPDIR}/${BIN_NAME}.linux-arm64"
+HAVE_LNX_AMD=0
+HAVE_LNX_ARM=0
+if build_arch linux amd64 "${LNX_AMD}"; then echo "✓ linux/amd64"; HAVE_LNX_AMD=1; else echo "✗ linux/amd64 失败"; fi
+if build_arch linux arm64 "${LNX_ARM}"; then echo "✓ linux/arm64"; HAVE_LNX_ARM=1; else echo "✗ linux/arm64 失败"; fi
 echo
 
 # ---------------------------------------------------------------------------
@@ -93,8 +101,7 @@ echo
 PKGDIR="${TMPDIR}/outcrop"
 mkdir -p "${PKGDIR}"
 
-cp "${UNI}" "${PKGDIR}/${BIN_NAME}"
-chmod 0755 "${PKGDIR}/${BIN_NAME}"
+# 二进制不在这里放 —— 包骨架对所有平台相同，打包时按目标各自塞进对应的二进制
 cp "${ROOT}/install.sh"   "${PKGDIR}/install.sh"
 cp "${ROOT}/uninstall.sh" "${PKGDIR}/uninstall.sh"
 cp "${ROOT}/README.md"    "${PKGDIR}/README.md"
@@ -139,37 +146,41 @@ mkdir -p "${DIST}"
 # `gh release create v1.1.0 dist/*` 会把 v1.0.0 的包一并传上去。
 # 只删本脚本自己按固定命名产出的那几类，不是 dist/* 一把梭 ——
 # 范围确定，也就不需要谁来替你判断这次删除安不安全。
-rm -f "${DIST}"/outcrop-*-darwin-*.tar.gz \
-      "${DIST}"/outcrop-*-darwin-*.tar.gz.sha256 \
-      "${DIST}"/outcrop-*-darwin-*.sh \
-      "${DIST}"/outcrop-*-darwin-*.sh.sha256
-ARCHIVE_NAME="outcrop-${VERSION}-darwin-${ARCH_TAG}.tar.gz"
-ARCHIVE="${DIST}/${ARCHIVE_NAME}"
+for os in darwin linux; do
+    rm -f "${DIST}"/outcrop-*-"${os}"-*.tar.gz \
+          "${DIST}"/outcrop-*-"${os}"-*.tar.gz.sha256 \
+          "${DIST}"/outcrop-*-"${os}"-*.sh \
+          "${DIST}"/outcrop-*-"${os}"-*.sh.sha256
+done
 
-# tar 用相对路径，包内顶层是 outcrop/。
-tar -C "${TMPDIR}" -czf "${ARCHIVE}" outcrop
+# package_target <二进制> <平台标签>：塞二进制 → tar → sha256 → 自解压 .sh → sha256。
+# 包骨架（脚本/配置/hooks）对所有平台相同，只有二进制按目标替换。
+package_target() {
+    local bin="$1" tag="$2"
+    cp "${bin}" "${PKGDIR}/${BIN_NAME}"
+    chmod 0755 "${PKGDIR}/${BIN_NAME}"
+    local name="outcrop-${VERSION}-${tag}.tar.gz"
+    local archive="${DIST}/${name}"
+    # tar 用相对路径，包内顶层是 outcrop/。
+    tar -C "${TMPDIR}" -czf "${archive}" outcrop
+    ( cd "${DIST}" && shasum -a 256 "${name}" > "${name}.sha256" )
+    echo "✓ ${archive} （$(ls -lh "${archive}" | awk '{print $5}')）"
+    # 自解压安装包：单文件，目标机器上一条命令搞定，且自带载荷校验
+    local selfsh="${DIST}/outcrop-${VERSION}-${tag}.sh"
+    bash "${ROOT}/scripts/mkself.sh" "${archive}" "${VERSION}" "${selfsh}"
+    ( cd "${DIST}" && shasum -a 256 "$(basename "${selfsh}")" > "$(basename "${selfsh}").sha256" )
+    echo
+}
 
-( cd "${DIST}" && shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256" )
+package_target "${UNI}" "darwin-${ARCH_TAG}"
+[ "${HAVE_LNX_AMD}" -eq 1 ] && package_target "${LNX_AMD}" "linux-amd64"
+[ "${HAVE_LNX_ARM}" -eq 1 ] && package_target "${LNX_ARM}" "linux-arm64"
 
-echo "✓ ${ARCHIVE} （$(ls -lh "${ARCHIVE}" | awk '{print $5}')）"
-echo "✓ ${ARCHIVE}.sha256"
-echo
-
-# 自解压安装包：单文件，目标机器上一条命令搞定，且自带载荷校验
-SELF_SH="${DIST}/outcrop-${VERSION}-darwin-${ARCH_TAG}.sh"
-bash "${ROOT}/scripts/mkself.sh" "${ARCHIVE}" "${VERSION}" "${SELF_SH}"
-( cd "${DIST}" && shasum -a 256 "$(basename "${SELF_SH}")" > "$(basename "${SELF_SH}").sha256" )
-echo "✓ ${SELF_SH}.sha256"
-echo
-
-# 包内二进制架构，便于核对
-echo "包内二进制架构: $(lipo -archs "${PKGDIR}/${BIN_NAME}" 2>/dev/null || echo "(lipo 不可用)")"
-echo
-echo "目标机器安装（推荐，单文件，自带校验）:"
-echo "   bash $(basename "${SELF_SH}")"
-echo "   bash $(basename "${SELF_SH}") --help    # 全部开关"
+echo "目标机器安装（推荐，单文件，自带校验；按平台选对应的包）:"
+echo "   bash outcrop-${VERSION}-<平台>.sh"
+echo "   bash outcrop-${VERSION}-<平台>.sh --help    # 全部开关"
 echo
 echo "或者用 tar 包:"
-echo "   shasum -a 256 -c ${ARCHIVE_NAME}.sha256"
-echo "   tar xzf ${ARCHIVE_NAME}"
+echo "   shasum -a 256 -c outcrop-${VERSION}-<平台>.tar.gz.sha256   # Linux 没 shasum 就 sha256sum -c"
+echo "   tar xzf outcrop-${VERSION}-<平台>.tar.gz"
 echo "   cd outcrop && ./install.sh"

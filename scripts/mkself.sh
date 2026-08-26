@@ -18,7 +18,17 @@ OUT="${3:?需要输出路径}"
 
 [ -f "${TARBALL}" ] || { echo "✗ 找不到 ${TARBALL}"; exit 1; }
 
-SUM="$(shasum -a 256 "${TARBALL}" | awk '{print $1}')"
+# shasum 是 perl 脚本，macOS 自带；精简 Linux 常常只有 coreutils 的 sha256sum。
+# 两头（打包机和目标机）都按这个顺序探测。
+sha256_of() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha256sum "$1" | awk '{print $1}'
+    fi
+}
+
+SUM="$(sha256_of "${TARBALL}")"
 SIZE="$(wc -c < "${TARBALL}" | tr -d ' ')"
 
 HEADER="$(mktemp)"
@@ -53,7 +63,16 @@ for a in "$@"; do
 done
 
 command -v python3 >/dev/null 2>&1 \
-    || { echo "✗ 需要 python3（macOS 自带）"; exit 1; }
+    || { echo "✗ 需要 python3（macOS 自带；Linux: apt/dnf install python3）"; exit 1; }
+
+# macOS 自带 shasum（perl），精简 Linux 常常只有 sha256sum（coreutils）
+sha256_of() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha256sum "$1" | awk '{print $1}'
+    fi
+}
 
 SELF="$0"
 # 头部到哪一行结束是算出来的，不是写死的
@@ -67,7 +86,7 @@ tail -n +"${ARCHIVE_LINE}" "${SELF}" > "${TMP}/payload.tar.gz"
 
 # 自校验，省掉手动 shasum -c 那一步
 GOT_SIZE="$(wc -c < "${TMP}/payload.tar.gz" | tr -d ' ')"
-GOT_SUM="$(shasum -a 256 "${TMP}/payload.tar.gz" | awk '{print $1}')"
+GOT_SUM="$(sha256_of "${TMP}/payload.tar.gz")"
 if [ "${GOT_SIZE}" != "${EXPECT_SIZE}" ] || [ "${GOT_SUM}" != "${EXPECT_SUM}" ]; then
     echo "✗ 载荷校验失败，安装包在传输中损坏了"
     echo "   期望 ${EXPECT_SIZE} 字节 / ${EXPECT_SUM}"

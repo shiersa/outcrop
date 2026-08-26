@@ -114,6 +114,16 @@ SYNC_LABEL="com.outcrop.pricing-sync"
 PREBUILT=0
 [ -x "${ROOT}/claude-statusline" ] && PREBUILT=1
 
+# 预编译二进制先试跑一次：拿错平台的包（比如 Linux 上装 darwin 包）时，
+# Exec format error 要在这里就说清楚，不能等装完 statusline 静默渲染不出来。
+if [ "${PREBUILT}" -eq 1 ] && ! "${ROOT}/claude-statusline" --version >/dev/null 2>&1; then
+    echo "✗ 包里的二进制在本机跑不起来（$(uname -s)/$(uname -m)）—— 平台拿错了？"
+    echo "   包名里的平台要和本机对上：darwin=macOS，linux-amd64=x86_64，linux-arm64=aarch64"
+    echo
+    echo "===== SCRIPT END ====="
+    exit 1
+fi
+
 run() { if [ "${DRY_RUN}" -eq 1 ]; then echo "   [dry-run] $*"; else eval "$@"; fi; }
 
 echo "===== 1. 前置检查 ====="
@@ -124,7 +134,7 @@ if [ "${PREBUILT}" -eq 1 ]; then
 else
     command -v go >/dev/null 2>&1 \
         && echo "✓ Go: $(go version | awk '{print $3}')" \
-        || { echo "✗ 未找到 go（macOS: brew install go）"; echo; echo "===== SCRIPT END ====="; exit 1; }
+        || { echo "✗ 未找到 go（macOS: brew install go；Linux: apt/dnf install golang 或官网装）"; echo; echo "===== SCRIPT END ====="; exit 1; }
 fi
 command -v python3 >/dev/null 2>&1 \
     && echo "✓ python3: $(python3 -V 2>&1)" \
@@ -286,7 +296,51 @@ echo
 echo "===== 6b. 单价定期同步 ====="
 echo
 PLIST="${HOME}/Library/LaunchAgents/${SYNC_LABEL}.plist"
-if [ "${PRICING_SYNC}" -eq 1 ]; then
+SYSD_UNIT="outcrop-pricing-sync"
+SYSD_DIR="${HOME}/.config/systemd/user"
+if [ "${PRICING_SYNC}" -eq 1 ] && [ "$(uname -s)" = "Linux" ]; then
+    # Linux 走 systemd user timer（launchd 的对等物）。没有 systemd 用户会话
+    # （WSL 默认、容器、部分服务器）就明说不装，别硬塞一个不会跑的定时器。
+    if [ "${DRY_RUN}" -eq 1 ]; then
+        echo "   [dry-run] 写入 ${SYSD_DIR}/${SYSD_UNIT}.{service,timer} 并 enable"
+    elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        mkdir -p "${SYSD_DIR}"
+        cat > "${SYSD_DIR}/${SYSD_UNIT}.service" <<UNIT_EOF
+[Unit]
+Description=outcrop pricing sync
+
+[Service]
+Type=oneshot
+ExecStart=${BIN} --sync-pricing
+StandardOutput=append:${SL_DIR}/cache/sync-pricing.log
+StandardError=append:${SL_DIR}/cache/sync-pricing.log
+UNIT_EOF
+        cat > "${SYSD_DIR}/${SYSD_UNIT}.timer" <<UNIT_EOF
+[Unit]
+Description=outcrop pricing sync (weekly)
+
+[Timer]
+# OnUnitActiveSec 而不是 OnCalendar：和 macOS 侧 StartInterval 的理由相同，
+# 机器睡过点的任务按间隔排会补跑；Persistent 让关机错过的也补。
+OnBootSec=5min
+OnUnitActiveSec=7d
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT_EOF
+        if systemctl --user daemon-reload 2>/dev/null \
+           && systemctl --user enable --now "${SYSD_UNIT}.timer" 2>/dev/null; then
+            echo "✓ ${SYSD_DIR}/${SYSD_UNIT}.timer"
+            echo "   每 7 天从 LiteLLM 同步一次单价，日志在 ${SL_DIR}/cache/sync-pricing.log"
+        else
+            echo "⚠️  unit 已写入但启用失败，手动: systemctl --user enable --now ${SYSD_UNIT}.timer"
+        fi
+    else
+        echo "⚠️  没有 systemd 用户会话（WSL/容器常见），定时同步装不了"
+        echo "   替代：手动跑 ${BIN} --sync-pricing，或自己加 crontab"
+    fi
+elif [ "${PRICING_SYNC}" -eq 1 ]; then
     if [ "${DRY_RUN}" -eq 1 ]; then
         echo "   [dry-run] 写入 ${PLIST} 并加载"
     else

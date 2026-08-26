@@ -266,12 +266,25 @@ echo "===== 4b. 单价定期同步 ====="
 echo
 SYNC_LABEL="com.outcrop.pricing-sync"
 PLIST="${HOME}/Library/LaunchAgents/${SYNC_LABEL}.plist"
-if [ -f "${PLIST}" ]; then
+SYSD_UNIT="outcrop-pricing-sync"
+SYNC_ON=0
+if [ "$(uname -s)" = "Linux" ] && [ -f "${HOME}/.config/systemd/user/${SYSD_UNIT}.timer" ]; then
+    # Linux 是 systemd user timer，和 macOS 的 LaunchAgent 对等（install.sh 6b）
+    SYNC_ON=1
+    if systemctl --user is-active "${SYSD_UNIT}.timer" >/dev/null 2>&1; then
+        ok "systemd timer 已启用（每 7 天同步一次单价）"
+    else
+        warn "timer 存在但未启用: systemctl --user enable --now ${SYSD_UNIT}.timer"
+    fi
+elif [ "$(uname -s)" != "Linux" ] && [ -f "${PLIST}" ]; then
+    SYNC_ON=1
     if launchctl list 2>/dev/null | grep -q "${SYNC_LABEL}"; then
         ok "LaunchAgent 已加载（每 7 天同步一次单价）"
     else
         warn "plist 存在但未加载: launchctl bootstrap gui/$(id -u) ${PLIST}"
     fi
+fi
+if [ "${SYNC_ON}" -eq 1 ]; then
     LOG="${SL_DIR}/cache/sync-pricing.log"
     if [ -f "${LOG}" ]; then
         ok "  最近一次: $(date -r "${LOG}" '+%Y-%m-%d %H:%M')"

@@ -36,14 +36,22 @@ ARGS="--binary '${BIN}' --state '${HOOK_DIR}/state.sh' --win '${HOOK_DIR}/win-st
 eval "python3 '${ROOT}/scripts/register.py' ${ARGS}" || echo "   ✗ 清理失败"
 echo
 
-echo "===== 3. 单价同步 LaunchAgent ====="
+echo "===== 3. 单价定时同步 ====="
 echo
 SYNC_LABEL="com.outcrop.pricing-sync"
 PLIST="${HOME}/Library/LaunchAgents/${SYNC_LABEL}.plist"
+SYSD_UNIT="outcrop-pricing-sync"
+SYSD_DIR="${HOME}/.config/systemd/user"
 if [ -f "${PLIST}" ]; then
     run "launchctl bootout 'gui/$(id -u)/${SYNC_LABEL}' 2>/dev/null || true"
     run "rm -f '${PLIST}'"
-    echo "✓ 已卸载"
+    echo "✓ 已卸载（LaunchAgent）"
+elif [ -f "${SYSD_DIR}/${SYSD_UNIT}.timer" ]; then
+    # Linux 侧是 systemd user timer（install.sh 6b 装的）
+    run "systemctl --user disable --now '${SYSD_UNIT}.timer' 2>/dev/null || true"
+    run "rm -f '${SYSD_DIR}/${SYSD_UNIT}.timer' '${SYSD_DIR}/${SYSD_UNIT}.service'"
+    run "systemctl --user daemon-reload 2>/dev/null || true"
+    echo "✓ 已卸载（systemd timer）"
 else
     echo "-  未安装"
 fi
