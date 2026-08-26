@@ -555,6 +555,11 @@ func isPrivateHost(base string) bool {
 
 func detectProvider() (string, string) {
 	base := strings.ToLower(os.Getenv("ANTHROPIC_BASE_URL"))
+	// bridge 场景（cc-goo）：base_url 指向本地代理，按域名判会误判成 local。
+	// 入口函数把真实身份放在 OUTCROP_PROVIDER 里，显式声明优先于猜测。
+	if p := os.Getenv("OUTCROP_PROVIDER"); p != "" {
+		return p, base
+	}
 	switch {
 	case base == "" || strings.Contains(base, "api.anthropic.com"):
 		return "anthropic", base
@@ -1153,8 +1158,13 @@ type opencodeUsage struct {
 
 // opencodeUsageURL 从 base_url 推导 usage 端点。不硬编码完整地址：
 // Zen 按订阅档位分路径（/zen/go/、/zen/…），跟着 base 走换档位不用改代码。
+// bridge 场景 ANTHROPIC_BASE_URL 是本地代理，真实上游在 OUTCROP_UPSTREAM 里。
 func opencodeUsageURL() string {
-	base := strings.TrimRight(os.Getenv("ANTHROPIC_BASE_URL"), "/")
+	base := os.Getenv("OUTCROP_UPSTREAM")
+	if base == "" {
+		base = os.Getenv("ANTHROPIC_BASE_URL")
+	}
+	base = strings.TrimRight(base, "/")
 	if base == "" {
 		return ""
 	}
@@ -1162,14 +1172,22 @@ func opencodeUsageURL() string {
 }
 
 func opencodeCachePath() string {
+	// 缓存按真实上游分文件：bridge 场景（cc-goo）和直连（cc-go）指的是
+	// 同一个订阅，共享一份缓存，别让两个入口各查一遍
+	base := os.Getenv("OUTCROP_UPSTREAM")
+	if base == "" {
+		base = os.Getenv("ANTHROPIC_BASE_URL")
+	}
+	// 尾斜杠先剥掉再算文件名：cc-go 的 base 带斜杠、cc-goo 的不带，
+	// 不归一的话同一个订阅会分裂成两份缓存
+	base = strings.TrimRight(strings.ToLower(base), "/")
 	safe := strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
 			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
 			return r
 		}
 		return '_'
-	}, strings.TrimPrefix(strings.TrimPrefix(
-		strings.ToLower(os.Getenv("ANTHROPIC_BASE_URL")), "https://"), "http://"))
+	}, strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"))
 	if safe == "" {
 		safe = "default"
 	}

@@ -69,6 +69,7 @@ cat <<EOF
    以下没有删除，需要的话自己清理：
 
      ${BIN}
+     ${SL_DIR}/claude-bridge
      ${SL_DIR}/            配置与 cache
      ${HOOK_DIR}/          原始 tmux 主题备份
      ~/.tmux.conf.bak-*    每次改动都留了带时间戳的备份

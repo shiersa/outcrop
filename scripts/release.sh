@@ -48,9 +48,9 @@ echo "===== 交叉编译（version=${VERSION}）====="
 echo
 
 build_arch() {
-    local goos="$1" goarch="$2" out="$3"
+    local goos="$1" goarch="$2" out="$3" pkg="${4:-./cmd/statusline}"
     GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
-        go build -ldflags="${LDFLAGS}" -o "${out}" ./cmd/statusline
+        go build -ldflags="${LDFLAGS}" -o "${out}" "${pkg}"
 }
 
 ARM="${TMPDIR}/${BIN_NAME}.arm64"
@@ -91,6 +91,28 @@ HAVE_LNX_AMD=0
 HAVE_LNX_ARM=0
 if build_arch linux amd64 "${LNX_AMD}"; then echo "✓ linux/amd64"; HAVE_LNX_AMD=1; else echo "✗ linux/amd64 失败"; fi
 if build_arch linux arm64 "${LNX_ARM}"; then echo "✓ linux/arm64"; HAVE_LNX_ARM=1; else echo "✗ linux/arm64 失败"; fi
+echo
+
+# claude-bridge（协议转换代理）随每个平台一起编。失败不拦发布 ——
+# 它是可选组件，包里缺了只是 cc-goo 不可用，install.sh 会如实说明。
+BR_NAME="claude-bridge"
+BR_UNI="${TMPDIR}/${BR_NAME}.darwin"
+BR_LNX_AMD="${TMPDIR}/${BR_NAME}.linux-amd64"
+BR_LNX_ARM="${TMPDIR}/${BR_NAME}.linux-arm64"
+BR_A="${TMPDIR}/${BR_NAME}.arm64"; BR_B="${TMPDIR}/${BR_NAME}.amd64"
+if build_arch darwin arm64 "${BR_A}" ./cmd/bridge \
+   && build_arch darwin amd64 "${BR_B}" ./cmd/bridge; then
+    if command -v lipo >/dev/null 2>&1; then
+        lipo -create -output "${BR_UNI}" "${BR_A}" "${BR_B}"
+    else
+        cp "${BR_A}" "${BR_UNI}"
+    fi
+    echo "✓ bridge darwin"
+else
+    BR_UNI=""; echo "⚠️  bridge darwin 编译失败，darwin 包不含 bridge"
+fi
+build_arch linux amd64 "${BR_LNX_AMD}" ./cmd/bridge && echo "✓ bridge linux/amd64" || { BR_LNX_AMD=""; echo "⚠️  bridge linux/amd64 失败"; }
+build_arch linux arm64 "${BR_LNX_ARM}" ./cmd/bridge && echo "✓ bridge linux/arm64" || { BR_LNX_ARM=""; echo "⚠️  bridge linux/arm64 失败"; }
 echo
 
 # ---------------------------------------------------------------------------
@@ -153,12 +175,19 @@ for os in darwin linux; do
           "${DIST}"/outcrop-*-"${os}"-*.sh.sha256
 done
 
-# package_target <二进制> <平台标签>：塞二进制 → tar → sha256 → 自解压 .sh → sha256。
+# package_target <statusline二进制> <bridge二进制|空> <平台标签>：
+# 塞二进制 → tar → sha256 → 自解压 .sh → sha256。
 # 包骨架（脚本/配置/hooks）对所有平台相同，只有二进制按目标替换。
 package_target() {
-    local bin="$1" tag="$2"
+    local bin="$1" brbin="$2" tag="$3"
     cp "${bin}" "${PKGDIR}/${BIN_NAME}"
     chmod 0755 "${PKGDIR}/${BIN_NAME}"
+    # bridge 可选：这个平台编出来了就带上，没有就确保骨架里不残留上一个平台的
+    rm -f "${PKGDIR}/${BR_NAME}"
+    if [ -n "${brbin}" ] && [ -f "${brbin}" ]; then
+        cp "${brbin}" "${PKGDIR}/${BR_NAME}"
+        chmod 0755 "${PKGDIR}/${BR_NAME}"
+    fi
     local name="outcrop-${VERSION}-${tag}.tar.gz"
     local archive="${DIST}/${name}"
     # tar 用相对路径，包内顶层是 outcrop/。
@@ -172,9 +201,9 @@ package_target() {
     echo
 }
 
-package_target "${UNI}" "darwin-${ARCH_TAG}"
-[ "${HAVE_LNX_AMD}" -eq 1 ] && package_target "${LNX_AMD}" "linux-amd64"
-[ "${HAVE_LNX_ARM}" -eq 1 ] && package_target "${LNX_ARM}" "linux-arm64"
+package_target "${UNI}" "${BR_UNI}" "darwin-${ARCH_TAG}"
+[ "${HAVE_LNX_AMD}" -eq 1 ] && package_target "${LNX_AMD}" "${BR_LNX_AMD}" "linux-amd64"
+[ "${HAVE_LNX_ARM}" -eq 1 ] && package_target "${LNX_ARM}" "${BR_LNX_ARM}" "linux-arm64"
 
 echo "目标机器安装（推荐，单文件，自带校验；按平台选对应的包）:"
 echo "   bash outcrop-${VERSION}-<平台>.sh"

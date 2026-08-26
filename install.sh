@@ -195,6 +195,46 @@ elif [ "${DRY_RUN}" -eq 0 ]; then
 else
     echo "   [dry-run] go build ./cmd/statusline"
 fi
+
+# claude-bridge：Anthropic -> OpenAI 协议转换代理（cc-goo 这类入口用）。
+# 部署逻辑与 statusline 相同：先比对，一样就不动。区别在失败语义 ——
+# bridge 是可选组件，编译失败/包里没有都不拦主链路安装，只是 cc-goo 不可用。
+BRIDGE="${SL_DIR}/claude-bridge"
+if [ "${PREBUILT}" -eq 1 ]; then
+    if [ ! -f "${ROOT}/claude-bridge" ]; then
+        echo "-  包里没有 claude-bridge（旧版包），跳过"
+    elif [ "${DRY_RUN}" -eq 0 ]; then
+        if [ -f "${BRIDGE}" ] && cmp -s "${ROOT}/claude-bridge" "${BRIDGE}"; then
+            echo "-  ${BRIDGE} 已是最新（未改动，不产生备份）"
+        else
+            [ -f "${BRIDGE}" ] && cp "${BRIDGE}" "${BRIDGE}.bak-${TS}"
+            cp "${ROOT}/claude-bridge" "${BRIDGE}"
+            chmod 0755 "${BRIDGE}"
+            xattr -dr com.apple.quarantine "${BRIDGE}" 2>/dev/null || true
+            echo "✓ ${BRIDGE} （$(ls -lh "${BRIDGE}" | awk '{print $5}')，预编译）"
+        fi
+    else
+        echo "   [dry-run] cp 预编译二进制 -> ${BRIDGE}"
+    fi
+elif [ "${DRY_RUN}" -eq 0 ]; then
+    NEWB="${BRIDGE}.new-${TS}"
+    if ( cd "${ROOT}" && GOFLAGS=-mod=mod go build -ldflags="-s -w" -o "${NEWB}" ./cmd/bridge ); then
+        if [ -f "${BRIDGE}" ] && cmp -s "${NEWB}" "${BRIDGE}"; then
+            rm -f "${NEWB}"
+            echo "-  ${BRIDGE} 已是最新（未改动，不产生备份）"
+        else
+            [ -f "${BRIDGE}" ] && cp "${BRIDGE}" "${BRIDGE}.bak-${TS}"
+            mv "${NEWB}" "${BRIDGE}"
+            chmod 0755 "${BRIDGE}"
+            echo "✓ ${BRIDGE} （$(ls -lh "${BRIDGE}" | awk '{print $5}')）"
+        fi
+    else
+        rm -f "${NEWB}"
+        echo "⚠️  claude-bridge 编译失败 —— 可选组件不拦安装，cc-goo 入口会不可用"
+    fi
+else
+    echo "   [dry-run] go build ./cmd/bridge"
+fi
 echo
 
 echo "===== 3. 部署 hook ====="
